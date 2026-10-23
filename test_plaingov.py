@@ -23,7 +23,7 @@ assert us_stage("Public Law")["short"] == "Became law"
 assert sponsor_name("Rep. Smith, John [R-TX-5]") == "Rep. John Smith (R-TX)"
 assert sc_sponsor("Erickson , G.M. Smith and Anderson", "H") == "Rep. Erickson and 2 others"
 assert sc_sponsor("Jackson and Davis", "S") == "Sen. Jackson and 1 other"
-assert sc_sponsor("Judiciary Committee", "S") == "Judiciary Committee"
+assert sc_sponsor("House Ways and Means Committee", "H") == "House Ways and Means Committee"
 
 row = ('<tr><td>266</td><td><a href="/billsearch.php?billnumbers=11&amp;session=126&amp;summary=B">S11</a></td><td>249</td>'
        '<td class="summarytext">Paid Family Leave</td><td>06/29/2026</td><td>S</td><td>06/30/2026</td>'

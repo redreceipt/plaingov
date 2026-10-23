@@ -144,8 +144,10 @@ def sc_rows(page):
 
 def sc_sponsor(by, chamber):
     """'Erickson , G.M. Smith and Davis' -> 'Rep. Erickson and 2 others'"""
+    if "Committee" in by:  # e.g. "House Ways and Means Committee"
+        return by
     names = [n.strip() for n in re.split(r",|\band\b", by) if n.strip()]
-    first = names[0] if "Committee" in names[0] else f"{'Rep.' if chamber == 'H' else 'Sen.'} {names[0]}"
+    first = f"{'Rep.' if chamber == 'H' else 'Sen.'} {names[0]}"
     more = len(names) - 1
     return first + (f" and {more} other{'s' if more > 1 else ''}" if more else "")
 
@@ -156,15 +158,21 @@ def sc_items():
 
 def sc_update(r):
     page = fetch(r["url"])
-    title = re.search(r"<b>Summary:</b>.*?<br>(.*?)<br>", page, re.S)
+    title = re.sub(r"\s*-\s*RATIFIED TITLE$", "", strip(re.search(r"<b>Summary:</b>.*?<br>(.*?)<br>", page, re.S).group(1)))
     by = re.search(r"(?:Bill|Resolution), By (.*?)<br>", page, re.S)
+    # The title alone is often too thin ("SO AS TO MAKE CERTAIN CHANGES"), so rewrite from the bill text.
+    link = re.search(r'href="(/sess[^"]+/bills/\d+\.htm)"', page, re.I)
+    text = strip(re.sub(r"<(s|strike|del)\b.*?</\1>", " ", fetch(SC + link.group(1)), flags=re.S | re.I)) if link else ""
+    start = text.find(title[:40])
+    # shortcut: first 12k chars only; huge bills (budgets) get summarized from their opening sections
+    source = text[start:start + 12000] if start >= 0 else title
     num, session = re.search(r"billnumbers=(\d+)&session=(\d+)", r["url"]).groups()
     chamber = r["bill"][0]
     return {
         "id": f"sc/{session}-{chamber.lower()}-{num}", "where": "South Carolina",
         "label": f"{chamber}. {num}", "resolution": False, "title": r["summary"], "official_url": r["url"],
         "sponsor": sc_sponsor(strip(by.group(1)), chamber) if by else None, "date": r["date"], "stage": r["stage"],
-        "source": re.sub(r"\s*-\s*RATIFIED TITLE$", "", strip(title.group(1))),
+        "source": source,
     }
 
 
@@ -198,8 +206,10 @@ def rewrite(rec):
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         raise ValueError(f"no JSON from LLM (stop_reason={r.get('stop_reason')}): {text[:200]!r}")
-    out = json.loads(m.group(0))
-    return {k: " ".join(str(out[k]).split()) for k in ("headline", "tweet", "summary")}
+    out = {k: " ".join(str(v).split()) for k, v in json.loads(m.group(0)).items()}
+    if re.search(r"\bsource\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out["summary"] + out["tweet"], re.I):
+        raise ValueError(f"rewrite talks about its source: {out['summary'][:200]!r}")
+    return {k: out[k] for k in ("headline", "tweet", "summary")}
 
 
 def save(new):
