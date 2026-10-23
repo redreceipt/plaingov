@@ -5,7 +5,7 @@ What your government is doing, in plain English.
 PlainGov watches Congress and all 50 state legislatures, rewrites new bills and milestones without jargon, publishes a simple page for each bill at [plaingov.com](https://plaingov.com), and posts the most interesting ones to [@plaingov](https://x.com/plaingov).
 
 - **Congress:** [Congress.gov API](https://api.congress.gov) bill summaries
-- **States:** [LegiScan](https://legiscan.com) (CC BY 4.0): bills that passed a chamber, passed the legislature, became law, or were vetoed
+- **States:** each legislature's own website, scraped about daily with [Open States' open-source scrapers](https://github.com/openstates/openstates-scrapers): bills that passed a chamber, passed the legislature, became law, or were vetoed
 - **AI:** Claude rewrites each update in plain English from the official record; [jev](https://typesafe.ai) scores how interesting it is, and only the best few per day get posted
 
 ## How it works
@@ -14,7 +14,8 @@ PlainGov watches Congress and all 50 state legislatures, rewrites new bills and 
 
 ```
 python3 plaingov.py congress   # new Congress.gov summaries -> pages + post queue
-python3 plaingov.py states     # new state milestones -> pages + post queue
+python3 plaingov.py scrape     # daemon: scrape every state ~daily -> pages + post queue + alerts
+python3 plaingov.py scrape SC  # scrape one state now
 python3 plaingov.py post       # post the most interesting queued update to @plaingov
 python3 plaingov.py site       # rebuild the static site
 python3 test_plaingov.py       # self-check
@@ -31,15 +32,21 @@ Environment (`~/plaingov.env` on the VM, never committed):
 | Variable | Purpose |
 |---|---|
 | `CONGRESS_API_KEY` | [api.data.gov key](https://api.congress.gov/sign-up/) |
-| `LEGISCAN_API_KEY` | [LegiScan API key](https://legiscan.com/legiscan) (free: 30k queries/month) |
+| `NEW_YORK_API_KEY`, `INDIANA_API_KEY`, `VA_API_KEY` | free keys some state scrapers need |
+| `ALERT_EMAIL`, `HEARTBEAT_URL` | where scraper alerts go; Better Stack heartbeat for the daemon |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | @plaingov's OAuth 1.0a keys (read+write) |
 | `DRY_RUN` | `1` (default) prints posts instead of sending |
-| `MAX_POSTS_PER_DAY`, `MIN_INTEREST`, `BACKFILL_DAYS`, `POLL_HOURS`, `SITE_URL`, `LLM_MODEL`, `JEV_MODEL`, `DATA_DIR` | optional overrides |
+| `MAX_POSTS_PER_DAY`, `MIN_INTEREST`, `BACKFILL_DAYS`, `PARALLEL`, `RESCRAPE_HOURS`, `SITE_URL`, `LLM_MODEL`, `JEV_MODEL`, `DATA_DIR` | optional overrides |
+
+## Monitoring
+
+After every state scrape, `health.json` records status, bill counts, and errors, and [plaingov.com/status](https://plaingov.com/status/) shows it publicly. You get an email and a phone push (exe.dev) when a state's scraper fails, its bill count drops by half, it hasn't succeeded in 2 days, or it recovers. Each alert checks the legislature's website so it says whether their site is down or our scraper needs a fix. A Better Stack heartbeat alerts if the daemon itself dies or stops succeeding.
 
 ## Deploy
 
 ```
 git clone https://github.com/redreceipt/plaingov ~/plaingov
 sudo cp ~/plaingov/*.service ~/plaingov/*.timer /etc/systemd/system/ && sudo systemctl daemon-reload
-sudo systemctl enable --now plaingov-web plaingov@congress.timer plaingov@states.timer plaingov@post.timer
+sudo usermod -aG docker exedev
+sudo systemctl enable --now plaingov-web plaingov-scrape plaingov@congress.timer plaingov@post.timer
 ```

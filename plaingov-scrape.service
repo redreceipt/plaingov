@@ -1,0 +1,15 @@
+[Unit]
+Description=plaingov: scrape every state legislature about daily, with alerts
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+User=exedev
+SupplementaryGroups=docker
+EnvironmentFile=/home/exedev/plaingov.env
+ExecStart=/usr/bin/python3 /home/exedev/plaingov/plaingov.py scrape
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -2,14 +2,14 @@
 """PlainGov: what your government is doing, in plain English.
 
 Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post queue
-       plaingov.py states     new milestones in all 50 state legislatures (LegiScan) -> pages + post queue
+       plaingov.py scrape     daemon: run each state legislature's scraper about daily -> pages + post queue + alerts
        plaingov.py post       post the most interesting queued update to X (@plaingov)
        plaingov.py site       rebuild the site only
 
 A feed's first run builds pages for what's already listed (states: last BACKFILL_DAYS) and queues no posts.
 DRY_RUN=1 (default) prints posts instead of sending them.
 """
-import base64, glob, hashlib, hmac, html, json, os, re, secrets, sys, time, urllib.parse, urllib.request
+import base64, contextlib, fcntl, glob, hashlib, hmac, html, json, os, re, secrets, shutil, subprocess, sys, threading, time, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 DATA = os.environ.get("DATA_DIR", os.path.expanduser("~/plaingov-data"))
@@ -20,7 +20,11 @@ JEV_MODEL = os.environ.get("JEV_MODEL", "jev-1.13-free")
 MAX_POSTS_PER_DAY = int(os.environ.get("MAX_POSTS_PER_DAY", "6"))
 MIN_INTEREST = float(os.environ.get("MIN_INTEREST", "1.5"))  # jev score, 0-4
 BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "60"))
-POLL_HOURS = float(os.environ.get("POLL_HOURS", "2"))  # per state; keeps LegiScan under 30k queries/month
+SCRAPER_IMAGE = os.environ.get("SCRAPER_IMAGE", "openstates/scrapers:latest")
+PARALLEL = int(os.environ.get("PARALLEL", "12"))  # scrapers are network-bound (~85 MB, ~1% CPU each)
+RESCRAPE_HOURS = float(os.environ.get("RESCRAPE_HOURS", "20"))
+ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micneeley14@gmail.com")  # exe.dev only emails the VM owner
+HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "")  # Better Stack heartbeat: alerts if the scraper daemon goes quiet
 UA = "plaingov-bot/1.0 (+https://github.com/redreceipt/plaingov)"
 URL_LEN = 23  # X counts every link as 23 chars
 
@@ -115,7 +119,7 @@ def congress_update(s):
     }
 
 
-# --- States (LegiScan) -------------------------------------------------------
+# --- States: each legislature's own website, via Open States' open-source scrapers ---------
 
 STATES = {
     "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California", "CO": "Colorado",
@@ -129,56 +133,210 @@ STATES = {
     "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
 }
 ASSEMBLY = {"CA", "NV", "NY", "NJ", "WI"}  # lower chamber is called the Assembly
-STATE_RESOLUTION = re.compile(r"^[HSA]C?R\d")  # HR, SR, HCR, ACR...: positions/commemorations, never law
+KEYS = {"NY": "NEW_YORK_API_KEY", "IN": "INDIANA_API_KEY", "VA": "VA_API_KEY"}  # free keys from each legislature
+# shortcut: California's scraper needs the state's database dumps loaded into MySQL; add a MySQL sidecar to cover it
+UNSUPPORTED = {"CA": "California's scraper needs its database dumps loaded into MySQL first"}
+LAW = {"became-law", "executive-signature", "veto-override-passage"}
+lock = threading.Lock()  # scrapers finish in parallel; serialize shared files and site builds
 
 
-def legiscan(**params):
-    q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], **params})
-    r = json.loads(fetch(f"https://api.legiscan.com/?{q}"))
-    if r.get("status") != "OK":
-        raise RuntimeError(f"LegiScan {params}: {r.get('alert', r)}")
-    return r
+def slug(s):
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
 
 
-def state_stage(st, number, status):
-    """LegiScan status: 2 passed one chamber, 3 passed both, 4 became law, 5 vetoed."""
+def org(org_id):
+    """Open States org ref '~{"classification": "upper"}' -> 'upper'."""
+    return json.loads(org_id[1:]).get("classification", "") if (org_id or "").startswith("~{") else ""
+
+
+def bill_stage(bill):
+    """(status, chamber, date) of a bill's furthest milestone: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed."""
+    passed, law, veto = {}, None, None
+    for a in sorted(bill["actions"], key=lambda a: a["date"]):
+        kinds, o, day = set(a["classification"]), org(a.get("organization_id")), a["date"][:10]
+        if "passage" in kinds and o in ("upper", "lower", "legislature"):
+            passed.setdefault(o, day)
+        law = day if kinds & LAW else law
+        veto = day if "executive-veto" in kinds else veto
+    both = "legislature" in passed or {"upper", "lower"} <= set(passed)
+    if law:
+        return 4, None, law
+    if veto and both:
+        return 5, None, veto
+    if both:
+        return 3, None, max(passed.values())
+    return (2, *next(iter(passed.items()))) if passed else None
+
+
+def state_stage(st, status, chamber=None):
     lower = "Assembly" if st in ASSEMBLY else "House"
-    ch = "Legislature" if st == "NE" else "Senate" if number.startswith("S") else lower
-    other = {"Senate": lower, "Legislature": ""}.get(ch, "Senate")
+    ch = {"upper": "Senate", "lower": lower}.get(chamber, "")
+    other = lower if ch == "Senate" else "Senate"
     return {
-        2: stage(1, f"Passed the {ch}", f"The {ch} voted to pass it.", f"The {other} needs to pass it too." if other else ""),
+        2: stage(1, f"Passed the {ch}", f"The {ch} voted to pass it.", f"The {other} needs to pass it too."),
         3: stage(2, "Passed the Legislature", "Lawmakers passed it.", "The Governor decides whether to sign it."),
         4: stage(3, "Became law", "It's now law."),
         5: stage(2, "Vetoed", "The Governor rejected (vetoed) it.", "Lawmakers can still make it law by voting to override the veto."),
     }[status]
 
 
-def states_items():
-    path = f"{DATA}/state/polled.json"
-    polled = load(path, {})
-    for st in STATES:
-        if time.time() - polled.get(st, 0) < POLL_HOURS * 3600:
-            continue
-        bills = [b for b in legiscan(op="getMasterList", state=st)["masterlist"].values() if isinstance(b, dict) and "bill_id" in b]
-        polled[st] = time.time()
-        write(path, json.dumps(polled))
-        for b in bills:
-            s = int(b.get("status") or 0)
-            if s in (2, 3, 4, 5) and not STATE_RESOLUTION.match(b["number"]):
-                yield f"{st}-{b['bill_id']}-{s}", {**b, "state": st}
+def state_items(st):
+    """Milestones in a state's latest scrape. Resolutions (commemorations, positions) never become law, so skip them."""
+    for f in glob.glob(f"{DATA}/scrape/{st.lower()}/bill_*.json"):
+        b = json.load(open(f))
+        s = bill_stage(b) if set(b["classification"]) & {"bill", "joint resolution", "constitutional amendment"} else None
+        if s:
+            yield f"{st}-{b['legislative_session']}-{b['identifier']}-{s[0]}", {**b, "state": st, "status": s, "_date": s[2]}
+
+
+def bill_text(b):
+    """Newest HTML version of the bill, struck-out text removed, for richer rewrites."""
+    for v in sorted(b["versions"], key=lambda v: v.get("date") or "", reverse=True):
+        for link in v["links"]:
+            if link.get("media_type") == "text/html":
+                try:
+                    return strip(re.sub(r"<(s|strike|del)\b.*?</\1>", " ", fetch(link["url"]), flags=re.S | re.I))
+                except Exception:
+                    return ""
+    return ""
 
 
 def state_update(b):
-    st, num = b["state"], b["number"]
-    year = b["url"].rstrip("/").rsplit("/", 1)[-1]
-    desc = b.get("description") or ""
+    st, (status, chamber, day) = b["state"], b["status"]
+    people = [s for s in b["sponsorships"] if s["primary"]] or b["sponsorships"]
+    sponsor = None
+    if people:
+        title = ("Sen. " if org(b["from_organization"]) in ("upper", "legislature") else "Rep. ") if people[0].get("entity_type") == "person" else ""
+        more = len(people) - 1
+        sponsor = title + people[0]["name"] + (f" and {more} other{'s' if more > 1 else ''}" if more else "")
+    abstract = " ".join(a["abstract"] for a in b["abstracts"])
+    # shortcut: first 12k chars only; huge bills (budgets) get summarized from their opening sections
+    source = " ".join(x for x in (b["title"], abstract, bill_text(b)) if x)[:12000]
     return {
-        "id": f"states/{st.lower()}/{year}-{num.lower()}", "where": STATES[st], "state": st,
-        "label": re.sub(r"^([A-Z]+)(\d+)$", r"\1 \2", num), "resolution": False, "title": b["title"],
-        "official_url": b["url"], "sponsor": None, "date": b["status_date"],
-        "stage": state_stage(st, num, int(b["status"])), "milestone": True,
-        "source": b["title"] if desc in ("", b["title"]) else f"{b['title']}. {desc}",
+        "id": f"states/{st.lower()}/{slug(b['legislative_session'])}-{slug(b['identifier'])}", "where": STATES[st], "state": st,
+        "label": b["identifier"], "resolution": False, "title": b["title"], "official_url": (b["sources"] or [{"url": ""}])[0]["url"],
+        "sponsor": sponsor, "date": day, "stage": state_stage(st, status, chamber), "milestone": True, "source": source,
     }
+
+
+# --- Scraper runs and monitoring ---------------------------------------------
+
+HEALTH = f"{DATA}/state/health.json"
+
+
+def alert(subject, body):
+    """Email (exe.dev gateway) + phone push (exe.dev notify). Never let alerting break a run."""
+    for url, payload in (("http://169.254.169.254/gateway/email/send", {"to": ALERT_EMAIL, "subject": subject, "body": body}),
+                         ("https://notify.int.exe.xyz/", {"title": subject, "body": body[:300]})):
+        try:
+            fetch(url, json.dumps(payload).encode(), {"Content-Type": "application/json"})
+        except Exception as ex:
+            print(f"alert via {url} failed: {ex!r}", file=sys.stderr, flush=True)
+    print(f"ALERT {subject}", flush=True)
+
+
+def site_status(url):
+    """Is the legislature's own website up? Tells 'their site is down' apart from 'our scraper broke'."""
+    if not url:
+        return "unknown"
+    try:
+        fetch(url)
+        return "up"
+    except Exception as ex:
+        return f"down ({getattr(ex, 'code', None) or type(ex).__name__})"
+
+
+def set_health(st, **fields):
+    with lock:
+        health = load(HEALTH, {})
+        health[st] = {**health.get(st, {}), **fields}
+        write(HEALTH, json.dumps(health, indent=1))
+        return health[st]
+
+
+def scrape_state(st):
+    """Run one state's scraper, publish its new milestones, and alert when its health changes."""
+    name, prev = STATES[st], load(HEALTH, {}).get(st, {})
+    if st in UNSUPPORTED or (st in KEYS and not os.environ.get(KEYS[st])):
+        return set_health(st, status="needs setup", error=UNSUPPORTED.get(st) or f"needs {KEYS[st]}", last_start=time.time())
+    out = f"{DATA}/scrape/{st.lower()}"
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(out)
+    set_health(st, status="running", last_start=time.time())
+    box = f"plaingov-scrape-{st.lower()}"
+    subprocess.run(["docker", "rm", "-f", box], capture_output=True)  # left over if the daemon restarted mid-scrape
+    cmd = ["docker", "run", "--rm", "--name", box, "--user", f"{os.getuid()}:{os.getgid()}", "-v", f"{out}:/data",
+           *[a for k in KEYS.values() if os.environ.get(k) for a in ("-e", k)],
+           SCRAPER_IMAGE, st.lower(), "bills", "--scrape", "--datadir", "/data"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=22 * 3600)
+        ok, log = p.returncode == 0, (p.stdout + p.stderr)[-2000:]
+    except subprocess.TimeoutExpired:
+        ok, log = False, "scraper still running after 22 hours"
+    files = glob.glob(f"{out}/bill_*.json")
+    bills = len(files)
+    error = "" if ok else log
+    if ok and not bills:
+        error = "scraper finished but found no bills"
+    elif ok and prev.get("bills") and bills < prev["bills"] * 0.5:
+        error = f"only {bills} bills, down from {prev['bills']}; the site may have changed"
+    page = (json.load(open(files[0]))["sources"] or [{}])[0].get("url", "") if files else ""
+    site = ("{0.scheme}://{0.netloc}/".format(urllib.parse.urlparse(page)) if page else "") or prev.get("site")
+    status = "failed" if error else "ok"
+    stats = {}
+    if status == "ok":
+        new, done, failed = process(f"states-{st.lower()}", state_items(st), state_update)
+        stats = {"last_ok": time.time(), "bills": bills, "milestones": new, "page_failures": failed}
+    h = set_health(st, status=status, error=error[-800:], last_end=time.time(), site=site, **stats)
+    if status == "failed" and prev.get("status") != "failed":
+        up = site_status(site)
+        cause = (f"The {name} legislature's website looks {up}, so this is probably on their end." if up.startswith("down")
+                 else f"The {name} legislature's website is {up}, so the scraper probably needs a fix (their site may have changed).")
+        alert(f"PlainGov: {name} scraper failed", f"{cause}\n\nError:\n{error[-1500:]}\n\nStatus page: {SITE_URL}/status/\n"
+              f"Rerun: ssh plaingov.exe.xyz 'cd plaingov && python3 plaingov.py scrape {st}'")
+    elif status == "ok" and prev.get("status") == "failed":
+        alert(f"PlainGov: {name} scraper recovered", f"{name} scraped {bills} bills successfully again.")
+    return h
+
+
+def check_stale(health):
+    """Alert once when a state hasn't had a good scrape in 2 days (e.g. it keeps timing out)."""
+    for st, h in health.items():
+        if h.get("status") != "needs setup" and time.time() - h.get("last_ok", time.time()) > 48 * 3600 and not h.get("stale_alerted"):
+            alert(f"PlainGov: {STATES[st]} hasn't updated in 2 days", f"Last error:\n{h.get('error', '')}\n\nStatus page: {SITE_URL}/status/")
+            set_health(st, stale_alerted=True)
+        elif h.get("stale_alerted") and time.time() - h.get("last_ok", 0) < 48 * 3600:
+            set_health(st, stale_alerted=False)
+
+
+def scrape(only=None):
+    """Daemon: keep PARALLEL scrapers busy, each state about every RESCRAPE_HOURS; pull scraper fixes daily."""
+    if only:
+        return print(scrape_state(only.upper()))
+    pool, running, pulled, started = ThreadPoolExecutor(PARALLEL), {}, 0, time.time()
+    while True:
+        if time.time() - pulled > 86400:
+            subprocess.run(["docker", "pull", "-q", SCRAPER_IMAGE], capture_output=True)
+            pulled = time.time()
+        for st, f in list(running.items()):
+            if f.done():
+                running.pop(st)
+                if f.exception():
+                    set_health(st, status="failed", error=repr(f.exception()), last_end=time.time())
+                    alert(f"PlainGov: {STATES[st]} run crashed", repr(f.exception()))
+        health = load(HEALTH, {})
+        due = sorted((st for st in STATES if st not in running and time.time() - health.get(st, {}).get("last_start", 0) > RESCRAPE_HOURS * 3600),
+                     key=lambda st: health.get(st, {}).get("last_start", 0))
+        for st in due[:PARALLEL - len(running)]:
+            running[st] = pool.submit(scrape_state, st)
+        check_stale(health)
+        # Heartbeat only while scrapes are succeeding, so Better Stack catches both a dead daemon and a stuck one.
+        if HEARTBEAT_URL and (time.time() - started < 26 * 3600 or any(time.time() - h.get("last_ok", 0) < 26 * 3600 for h in health.values())):
+            try:
+                fetch(HEARTBEAT_URL)
+            except Exception as ex:
+                print(f"heartbeat failed: {ex!r}", file=sys.stderr, flush=True)
+        time.sleep(60)
 
 
 # --- AI: plain-English rewrite (Claude) and interest score (jev) ----------------
@@ -281,6 +439,7 @@ dt{color:var(--muted)}dd{margin:0}
 .grid a{display:block;background:#fff;border:1px solid var(--line);border-radius:10px;padding:.6rem .8rem;text-decoration:none;color:var(--ink);font-weight:600}
 .grid a:hover{border-color:var(--accent)}
 .official{display:inline-block;margin-top:2rem;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600}
 footer{color:var(--muted);font-size:.85rem;margin-top:3rem;padding-bottom:2rem}
 footer p{border-top:1px solid var(--line);padding-top:1rem}
 @media (max-width:32rem){h1{font-size:1.6rem}.tracker{grid-template-columns:1fr 1fr}}
@@ -301,8 +460,9 @@ def page(title, desc, body, path=""):
 <header><a class="brand" href="/">Plain<span>Gov</span></a><nav><a href="/us/">Congress</a><a href="/states/">States</a></nav></header>
 <main>{body}</main>
 <footer><p>Plain-English summaries are written with AI from official records and may leave out details.
-Sources: <a href="https://www.congress.gov">Congress.gov</a> and <a href="https://legiscan.com">LegiScan</a> (CC BY 4.0).
-<a href="https://github.com/redreceipt/plaingov">Code</a>.</p></footer>
+Sources: <a href="https://www.congress.gov">Congress.gov</a> and each state legislature's website
+(via <a href="https://github.com/openstates/openstates-scrapers">Open States' scrapers</a>).
+<a href="/status/">Data status</a> · <a href="https://github.com/redreceipt/plaingov">Code</a>.</p></footer>
 </body></html>
 """
 
@@ -388,6 +548,18 @@ def build_site():
         write(f"{DATA}/site/states/{st.lower()}/index.html", page(f"{n} · PlainGov", f"What the {n} legislature is doing, in plain English.",
               f"<p class=eyebrow><a href=\"/states/\">The states</a></p><h1>{n}</h1><p class=lede>Bills that passed a vote in the {n} legislature, newest first.</p>"
               + by_stage([r for r in states if r["state"] == st], False), f"states/{st.lower()}/"))
+    write(f"{DATA}/site/status/index.html", page("Data status · PlainGov", "How fresh PlainGov's data is for each legislature.", status_body(load(HEALTH, {})), "status/"))
+
+
+def status_body(health):
+    label = {"ok": "Up to date", "running": "Checking now", "failed": "Having trouble", "needs setup": "Coming soon"}
+    rows = "".join(
+        f"<tr><td><a href=\"/states/{st.lower()}/\">{n}</a></td><td>{label.get(h.get('status'), 'Not checked yet')}</td>"
+        f"<td>{time.strftime('%b %-d, %-I:%M %p UTC', time.gmtime(h['last_ok'])) if h.get('last_ok') else '—'}</td><td>{h.get('bills', '—')}</td></tr>"
+        for st, n, h in sorted(((st, n, health.get(st, {})) for st, n in STATES.items()), key=lambda x: x[1]))
+    return ("<h1>Data status</h1><p class=lede>We check every state legislature's website about once a day. "
+            "If a site is down or changes, we get an alert and fix it.</p>"
+            f"<table><thead><tr><th>State</th><th>Status</th><th>Last good check</th><th>Bills tracked</th></tr></thead><tbody>{rows}</tbody></table>")
 
 
 # --- X ----------------------------------------------------------------------
@@ -420,6 +592,11 @@ def post_x(text):
 
 
 def post():
+    with queue_lock():
+        post_best()
+
+
+def post_best():
     """Post the most interesting update from the last day, spacing posts evenly under MAX_POSTS_PER_DAY."""
     qpath, lpath = f"{DATA}/state/queue.json", f"{DATA}/state/posts.json"
     now = time.time()
@@ -444,17 +621,23 @@ def post():
     print(f"post: {why}; {len(queue)} queued, {len(recent)} posted in the last day")
 
 
-FEEDS = {"congress": (congress_items, congress_update), "states": (states_items, state_update)}
+@contextlib.contextmanager
+def queue_lock():
+    """The scraper daemon and the hourly poster both edit the post queue."""
+    os.makedirs(f"{DATA}/state", exist_ok=True)
+    with open(f"{DATA}/state/.queue.lock", "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
 
 
-def run(feed):
-    items, update = FEEDS[feed]
+def process(feed, items, update):
+    """Build pages for a feed's new items and queue them for posting. Returns (new, updated, failed)."""
     path, qpath = f"{DATA}/state/{feed}.json", f"{DATA}/state/queue.json"
     first = not os.path.exists(path)
     seen = set(load(path, []))
-    new = [(k, v) for k, v in dict(items()).items() if k not in seen]
+    new = [(k, v) for k, v in dict(items).items() if k not in seen]
     cutoff = time.strftime("%Y-%m-%d", time.gmtime(time.time() - BACKFILL_DAYS * 86400))
-    todo = [(k, v) for k, v in new if not first or v.get("status_date", "9999") >= cutoff]
+    todo = [(k, v) for k, v in new if not first or v.get("_date", "9999") >= cutoff]
 
     def one(kv):
         try:
@@ -467,13 +650,18 @@ def run(feed):
     seen |= {k for k, _ in (new if first else done)}  # a first run never retries or posts the backlog
     write(path, json.dumps(sorted(seen)))
     if not first:
-        queue = load(qpath, []) + [{"id": r["id"], "key": k, "interest": r["interest"], "at": time.time()} for k, r in done]
-        write(qpath, json.dumps(queue))
-    build_site()
+        with queue_lock():
+            queue = load(qpath, []) + [{"id": r["id"], "key": k, "interest": r["interest"], "at": time.time()} for k, r in done]
+            write(qpath, json.dumps(queue))
+    with lock:
+        build_site()
     failed = len(todo) - len(done)
-    print(f"{feed}: {len(new)} new, {len(done)} pages updated, {failed} failed{' (first run: no posts queued)' if first else ''}")
-    sys.exit(1 if failed and not first else 0)
+    print(f"{feed}: {len(new)} new, {len(done)} pages updated, {failed} failed{' (first run: no posts queued)' if first else ''}", flush=True)
+    return len(new), len(done), failed
 
 
 if __name__ == "__main__":
-    {"site": build_site, "post": post}.get(sys.argv[1], lambda: run(sys.argv[1]))()
+    cmd, arg = sys.argv[1], (sys.argv[2:] or [None])[0]
+    if cmd == "congress":
+        sys.exit(1 if process("congress", congress_items(), congress_update)[2] else 0)
+    {"site": build_site, "post": post, "scrape": lambda: scrape(arg)}[cmd]()
