@@ -473,6 +473,17 @@ def interest(rec):
     return round(r["answers"]["interest"]["score"], 2)
 
 
+def score(rec):
+    """Store a jev interest score on the bill; None (try again later) if jev is unavailable, e.g. its free daily limit."""
+    try:
+        rec["interest"] = interest(rec)
+        write(f"{DATA}/bills/{rec['id']}.json", json.dumps(rec, indent=1))
+    except Exception as ex:
+        print(f"jev unavailable for {rec.get('id')}: {ex!r}", file=sys.stderr, flush=True)
+        rec["interest"] = None
+    return rec["interest"]
+
+
 def save(new):
     """Merge an update into the bill's record; only re-run the rewrite when the source or status changed."""
     path = f"{DATA}/bills/{new['id']}.json"
@@ -480,7 +491,6 @@ def save(new):
     if (rec.get("source"), rec.get("stage"), rec.get("v")) != (new["source"], new["stage"], PROMPT_VERSION):
         rec.update(rewrite(new), v=PROMPT_VERSION)
     rec.update(new)
-    rec["interest"] = interest(rec)
     u = {"date": new["date"], "short": new["stage"]["short"], "now": new["stage"]["now"]}
     if u not in rec["updates"]:
         rec["updates"].append(u)
@@ -668,7 +678,7 @@ def build_site():
     us = [r for r in recs if not r.get("state")]
     states = [r for r in recs if r.get("state")]
     week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
-    top = sorted((r for r in recs if r["date"] >= week), key=lambda r: r.get("interest", 0), reverse=True)[:6]
+    top = sorted((r for r in recs if r["date"] >= week), key=lambda r: r.get("interest") or 0, reverse=True)[:6]
     home = f"""<section class=hero><h1>What's going on in government, in plain English.</h1>
 <p class=lede>New bills and laws from Congress and all 50 states, explained like a friend would. No jargon, no spin.</p></section>
 {'<h2>Biggest stories this week</h2>' + items(top) if top else ''}
@@ -794,7 +804,10 @@ def post_best():
     queue = [q for q in load(qpath, []) if now - q["at"] < 86400]  # day-old news isn't news
     log = load(lpath, [])
     recent = [p for p in log if now - p["at"] < 86400]
-    best = max(queue, key=lambda q: q["interest"], default=None)
+    for q in queue:  # scores that failed earlier (e.g. jev's free limit) get another try
+        if q["interest"] is None:
+            q["interest"] = score(load(f"{DATA}/bills/{q['id']}.json", None) or {})
+    best = max((q for q in queue if q["interest"] is not None), key=lambda q: q["interest"], default=None)
     if not best or best["interest"] < MIN_INTEREST:
         why = "nothing interesting enough"
     elif len(recent) >= MAX_POSTS_PER_DAY or (recent and now - recent[-1]["at"] < 86400 / MAX_POSTS_PER_DAY - 300):
@@ -832,9 +845,12 @@ def process(feed, items, update):
 
     def one(kv):
         try:
-            return kv[0], save(update(kv[1]))
+            rec = save(update(kv[1]))
         except Exception as ex:  # retried next run; one bad item shouldn't block the rest
-            print(f"FAILED {kv[0]}: {ex!r}", file=sys.stderr, flush=True)
+            return print(f"FAILED {kv[0]}: {ex!r}", file=sys.stderr, flush=True)
+        if not first:  # only new updates are post candidates, so only they need a jev score
+            score(rec)
+        return kv[0], rec
 
     with ThreadPoolExecutor(6) as pool:
         done = [d for d in pool.map(one, todo) if d]
@@ -842,7 +858,7 @@ def process(feed, items, update):
     write(path, json.dumps(sorted(seen)))
     if not first:
         with queue_lock():
-            queue = load(qpath, []) + [{"id": r["id"], "key": k, "interest": r["interest"], "at": time.time()} for k, r in done]
+            queue = load(qpath, []) + [{"id": r["id"], "key": k, "interest": r.get("interest"), "at": time.time()} for k, r in done]
             write(qpath, json.dumps(queue))
     with lock:
         build_site()
