@@ -9,7 +9,7 @@ Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post qu
 A feed's first run builds pages for what's already listed (states: last BACKFILL_DAYS) and queues no posts.
 DRY_RUN=1 (default) prints posts instead of sending them.
 """
-import base64, contextlib, fcntl, glob, hashlib, hmac, html, json, os, re, secrets, shutil, subprocess, sys, threading, time, urllib.parse, urllib.request
+import base64, contextlib, fcntl, glob, hashlib, hmac, html, json, os, re, secrets, subprocess, sys, threading, time, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 DATA = os.environ.get("DATA_DIR", os.path.expanduser("~/plaingov-data"))
@@ -227,15 +227,31 @@ def state_update(b):
 HEALTH = f"{DATA}/state/health.json"
 
 
+pending = []  # alerts are batched so a mass failure sends one digest, not one email per state
+
+
 def alert(subject, body):
-    """Email (exe.dev gateway) + phone push (exe.dev notify). Never let alerting break a run."""
+    with lock:
+        pending.append((subject, body))
+    print(f"ALERT {subject}", flush=True)
+
+
+def flush_alerts():
+    """Email (exe.dev gateway) + phone push (exe.dev notify) one digest. Never let alerting break a run."""
+    with lock:
+        batch = pending[:]
+        pending.clear()
+    if not batch:
+        return
+    subject = batch[0][0] if len(batch) == 1 else f"PlainGov: {len(batch)} scraper alerts"
+    body = "\n\n----\n\n".join(f"{s}\n\n{b}" for s, b in batch)
+    push = "; ".join(s.removeprefix("PlainGov: ") for s, _ in batch)
     for url, payload in (("http://169.254.169.254/gateway/email/send", {"to": ALERT_EMAIL, "subject": subject, "body": body}),
-                         ("https://notify.int.exe.xyz/", {"title": subject, "body": body[:300]})):
+                         ("https://notify.int.exe.xyz/", {"title": subject, "body": push[:300]})):
         try:
             fetch(url, json.dumps(payload).encode(), {"Content-Type": "application/json"})
         except Exception as ex:
             print(f"alert via {url} failed: {ex!r}", file=sys.stderr, flush=True)
-    print(f"ALERT {subject}", flush=True)
 
 
 def site_status(url):
@@ -263,12 +279,14 @@ def scrape_state(st):
     if st in UNSUPPORTED or (st in KEYS and not os.environ.get(KEYS[st])):
         return set_health(st, status="needs setup", error=UNSUPPORTED.get(st) or f"needs {KEYS[st]}", last_start=time.time())
     out = f"{DATA}/scrape/{st.lower()}"
-    shutil.rmtree(out, ignore_errors=True)
-    os.makedirs(out)
+    os.makedirs(out, exist_ok=True)
+    # The image only runs as root (its Python env lives in /root), so clean up and hand files back via the image too.
+    in_box = lambda *cmd: subprocess.run(["docker", "run", "--rm", "-v", f"{out}:/data", "--entrypoint", cmd[0], SCRAPER_IMAGE, *cmd[1:]], capture_output=True)
+    in_box("find", "/data", "-mindepth", "1", "-delete")
     set_health(st, status="running", last_start=time.time())
     box = f"plaingov-scrape-{st.lower()}"
     subprocess.run(["docker", "rm", "-f", box], capture_output=True)  # left over if the daemon restarted mid-scrape
-    cmd = ["docker", "run", "--rm", "--name", box, "--user", f"{os.getuid()}:{os.getgid()}", "-v", f"{out}:/data",
+    cmd = ["docker", "run", "--rm", "--name", box, "-v", f"{out}:/data",
            *[a for k in KEYS.values() if os.environ.get(k) for a in ("-e", k)],
            SCRAPER_IMAGE, st.lower(), "bills", "--scrape", "--datadir", "/data"]
     try:
@@ -276,6 +294,7 @@ def scrape_state(st):
         ok, log = p.returncode == 0, (p.stdout + p.stderr)[-2000:]
     except subprocess.TimeoutExpired:
         ok, log = False, "scraper still running after 22 hours"
+    in_box("chown", "-R", f"{os.getuid()}:{os.getgid()}", "/data")
     files = scraped(st)
     bills = len(files)
     error = "" if ok else log
@@ -315,7 +334,8 @@ def check_stale(health):
 def scrape(only=None):
     """Daemon: keep PARALLEL scrapers busy, each state about every RESCRAPE_HOURS; pull scraper fixes daily."""
     if only:
-        return print(scrape_state(only.upper()))
+        print(scrape_state(only.upper()))
+        return flush_alerts()
     pool, running, pulled, started = ThreadPoolExecutor(PARALLEL), {}, 0, time.time()
     while True:
         if time.time() - pulled > 86400:
@@ -333,6 +353,7 @@ def scrape(only=None):
         for st in due[:PARALLEL - len(running)]:
             running[st] = pool.submit(scrape_state, st)
         check_stale(health)
+        flush_alerts()
         # Public heartbeat for the off-box watchdog (.github/workflows/watchdog.yml): daemon alive + states succeeding.
         write(f"{DATA}/site/status/health.json", json.dumps({"updated": time.time(), "started": started, "states": {
             st: {k: h.get(k) for k in ("status", "last_ok", "bills")} for st, h in health.items()}}))
