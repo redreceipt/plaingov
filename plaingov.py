@@ -143,6 +143,7 @@ KEYS = {"NY": "NEW_YORK_API_KEY", "IN": "INDIANA_API_KEY", "VA": "VA_API_KEY"}  
 # shortcut: California's scraper needs the state's database dumps loaded into MySQL; add a MySQL sidecar to cover it
 UNSUPPORTED = {"CA": "California's scraper needs its database dumps loaded into MySQL first"}
 LAW = {"became-law", "executive-signature", "veto-override-passage"}
+RPM = {"UT": 20, "WI": 20}  # requests/minute for sites that rate-limit the default 60
 # Sites that block automated visitors (IP blocks, Cloudflare challenges): use LegiScan's API there instead (CC BY 4.0).
 LEGISCAN_STATES = [s for s in os.environ.get("LEGISCAN_STATES", "IL,AK").split(",") if s]
 lock = threading.Lock()  # scrapers finish in parallel; serialize shared files and site builds
@@ -344,7 +345,7 @@ def scrape_state(st):
     subprocess.run(["docker", "rm", "-f", box], capture_output=True)  # left over if the daemon restarted mid-scrape
     cmd = ["docker", "run", "--rm", "--name", box, "-v", f"{out}:/data",
            *[a for k in KEYS.values() if os.environ.get(k) for a in ("-e", k)],
-           SCRAPER_IMAGE, st.lower(), "bills", "--scrape", "--datadir", "/data"]
+           SCRAPER_IMAGE, st.lower(), "bills", "--scrape", "--datadir", "/data", "--rpm", str(RPM.get(st, 60))]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=22 * 3600)
         ok, log = p.returncode == 0, (p.stdout + p.stderr)[-2000:]
@@ -409,7 +410,9 @@ def scrape(only=None):
                     set_health(st, status="failed", error=repr(f.exception()), last_end=time.time())
                     alert(f"PlainGov: {STATES[st]} run crashed", repr(f.exception()))
         health = load(HEALTH, {})
-        due = sorted((st for st in STATES if st not in running and time.time() - health.get(st, {}).get("last_start", 0) > RESCRAPE_HOURS * 3600),
+        # Failures are usually a site hiccup (500s, timeouts), so retry those after 2 hours instead of a day.
+        wait = lambda h: (2 if h.get("status") == "failed" else RESCRAPE_HOURS) * 3600
+        due = sorted((st for st in STATES if st not in running and time.time() - health.get(st, {}).get("last_start", 0) > wait(health.get(st, {}))),
                      key=lambda st: health.get(st, {}).get("last_start", 0))
         for st in due[:PARALLEL - len(running)]:
             running[st] = pool.submit(scrape_state, st)
