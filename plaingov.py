@@ -297,18 +297,19 @@ def scrape_state(st):
     in_box("chown", "-R", f"{os.getuid()}:{os.getgid()}", "/data")
     files = scraped(st)
     bills = len(files)
+    sessions = sorted({json.load(open(f))["legislative_session"] for f in files})
+    # A new session legitimately starts small; only a drop within the same session(s) means the site changed.
+    same = prev.get("bills") and prev.get("sessions") == sessions
     error = "" if ok else log
-    if ok and not bills:
-        error = "scraper finished but found no bills"
-    elif ok and prev.get("bills") and bills < prev["bills"] * 0.5:
-        error = f"only {bills} bills, down from {prev['bills']}; the site may have changed"
+    if ok and same and bills < prev["bills"] * 0.5:
+        error = f"only {bills} bills, down from {prev['bills']} in the same session; the site may have changed"
     page = (json.load(open(files[0]))["sources"] or [{}])[0].get("url", "") if files else ""
     site = ("{0.scheme}://{0.netloc}/".format(urllib.parse.urlparse(page)) if page else "") or prev.get("site")
     status = "failed" if error else "ok"
     stats = {}
     if status == "ok":
         new, done, failed = process(f"states-{st.lower()}", state_items(st), state_update)
-        stats = {"last_ok": time.time(), "bills": bills, "milestones": new, "page_failures": failed}
+        stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed}
     h = set_health(st, status=status, error=error[-800:], last_end=time.time(), site=site, **stats)
     if status == "failed" and prev.get("status") != "failed":
         up = site_status(site)
