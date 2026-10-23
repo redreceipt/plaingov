@@ -1,11 +1,12 @@
 [Unit]
-Description=plaingov static site on :8000 (exe.dev proxies HTTPS to it)
+Description=plaingov static site on :8000 (exe.dev proxies HTTPS to it; Vercel sits in front of plaingov.com)
 After=network.target
 
 [Service]
 User=exedev
+EnvironmentFile=/home/exedev/plaingov.env
 ExecStartPre=/usr/bin/mkdir -p /home/exedev/plaingov-data/site
-ExecStart=/usr/bin/python3 -m http.server 8000 --bind 0.0.0.0 --directory /home/exedev/plaingov-data/site
+ExecStart=/usr/bin/python3 /home/exedev/plaingov/plaingov.py serve
 Restart=always
 
 [Install]

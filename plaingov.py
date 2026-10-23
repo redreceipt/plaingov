@@ -9,7 +9,7 @@ Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post qu
 A feed's first run builds pages for what's already listed (states: last BACKFILL_DAYS) and queues no posts.
 DRY_RUN=1 (default) prints posts instead of sending them.
 """
-import base64, contextlib, fcntl, glob, hashlib, hmac, html, json, os, re, secrets, subprocess, sys, threading, time, urllib.parse, urllib.request
+import base64, contextlib, fcntl, glob, hashlib, hmac, html, json, os, re, secrets, shutil, subprocess, sys, threading, time, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 DATA = os.environ.get("DATA_DIR", os.path.expanduser("~/plaingov-data"))
@@ -77,15 +77,15 @@ def us_stage(desc):
     ch = "House" if "House" in desc else "Senate"
     other = "Senate" if ch == "House" else "House"
     if "Public Law" in desc:
-        return stage(3, "Became law", "It's now law.")
+        return stage(3, "It's law", "It's officially law now.")
     if "agreed to" in desc:
-        return stage(2, "Passed Congress", "The House and Senate both passed it.", "The President decides whether to sign it into law.")
+        return stage(2, "Passed Congress", "The House and Senate both said yes.", "Now it's up to the President to sign it or not.")
     if desc.startswith("Passed"):
-        return stage(1, f"Passed the {ch}", f"The {ch} voted to pass it.", f"The {other} needs to pass it too.")
+        return stage(1, f"Passed the {ch}", f"The {ch} voted yes.", f"Now the {other} has to say yes too.")
     if desc.startswith("Reported"):
-        return stage(0, f"Moving in the {ch}", f"A {ch} committee reviewed it and sent it to the full {ch}.", f"The full {ch} may vote on it.")
-    who = "A member of the House" if ch == "House" else "A senator"
-    return stage(0, f"Proposed in the {ch}", f"{who} proposed it.", f"A {ch} committee looks at it first. Most bills stop here.")
+        return stage(0, f"Moving in the {ch}", f"A small group in the {ch} (a committee) looked it over and sent it on.", f"The whole {ch} might vote on it next.")
+    who = "Someone in the House" if ch == "House" else "A senator"
+    return stage(0, "Just proposed", f"{who} just proposed it.", f"A small group in the {ch} (a committee) looks at it first. Heads up: most bills never make it past this step.")
 
 
 def sponsor_name(full):
@@ -94,10 +94,17 @@ def sponsor_name(full):
     return f"{m[1]} {m[3]} {m[2]} ({m[4]}-{m[5]})" if m else full
 
 
-def congress_items():
-    # shortcut: newest 250 from the last 3 days; a burst of >250 between runs drops the overflow
-    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3 * 86400))
-    for s in reversed(api("summaries", limit=250, sort="updateDate desc", fromDateTime=since)["summaries"]):
+def congress_items(days=3):
+    """Bill summaries published in the last `days`, oldest first."""
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days * 86400))
+    found, offset = [], 0
+    while True:
+        batch = api("summaries", limit=250, offset=offset, sort="updateDate desc", fromDateTime=since)["summaries"]
+        found += batch
+        if len(batch) < 250:
+            break
+        offset += 250
+    for s in reversed(found):
         b = s["bill"]
         yield f"{b['congress']}-{b['type']}-{b['number']}-{s['versionCode']}", s
 
@@ -172,10 +179,10 @@ def state_stage(st, status, chamber=None):
     ch = {"upper": "Senate", "lower": lower}.get(chamber, "")
     other = lower if ch == "Senate" else "Senate"
     return {
-        2: stage(1, f"Passed the {ch}", f"The {ch} voted to pass it.", f"The {other} needs to pass it too."),
-        3: stage(2, "Passed the Legislature", "Lawmakers passed it.", "The Governor decides whether to sign it."),
-        4: stage(3, "Became law", "It's now law."),
-        5: stage(2, "Vetoed", "The Governor rejected (vetoed) it.", "Lawmakers can still make it law by voting to override the veto."),
+        2: stage(1, f"Passed the {ch}", f"The {ch} voted yes.", f"Now the {other} has to say yes too."),
+        3: stage(2, "Passed lawmakers", "State lawmakers said yes.", "Now it's up to the Governor to sign it or not."),
+        4: stage(3, "It's law", "It's officially law now."),
+        5: stage(2, "Vetoed", "The Governor said no (that's a veto).", "Lawmakers can still make it law if enough of them vote to overrule the Governor."),
     }[status]
 
 
@@ -367,21 +374,22 @@ def scrape(only=None):
 
 # --- AI: plain-English rewrite (Claude) and interest score (jev) ----------------
 
-PROMPT = """You write for PlainGov, which explains government to everyday people.
-Rewrite this {where} bill for a general audience, at about an 8th-grade reading level.
+PROMPT_VERSION = 2  # bump to rewrite every page with a changed prompt (python3 plaingov.py rebuild)
+PROMPT = """You write for PlainGov, which explains government to regular people who don't follow politics.
+Explain this {where} bill the way you'd text a smart friend: casual, warm, and dead simple.
 
 Rules:
 - Use only facts in the source. Don't guess about effects, costs, or motives.
-- Neutral and nonpartisan. No opinions, hype words, emojis, or hashtags.
-- No jargon or legal terms (like "appropriations", "amend", "statute", "section 8-11-155", "local educational agency"). Say it the way you'd explain it to a neighbor.
-- Headline and summary: present tense, starting with a verb where natural ("Gives...", "Requires...").
-- Tweet: match the status. Unless it's law, say what it would do ("would", "if passed"); never imply it already happened.
+- Neutral and nonpartisan. No opinions, no hype, no slang, no emojis or hashtags.
+- Everyday words and short sentences, about a 6th-grade reading level. Say "you" when it affects the reader.
+- Zero jargon or legal terms (like "appropriations", "amend", "statute", "provisions", "section 8-11-155", "local educational agency"). If you must use a government word, explain it in a few words.
+- Match the status. Unless it's law, say what it would do ("would", "if it passes"); never imply it already happened.
 - If the source is brief, keep it brief and describe only what it says. Never mention the source or what it leaves out. Always reply with the JSON.
 
 Reply with only a JSON object with these keys:
-"headline": what it does in 4-9 words, sentence case, no period (max 70 characters)
-"tweet": one sentence that makes a regular person stop scrolling: lead with who it affects or what changes for them, in concrete terms (max 140 characters)
-"summary": at most 3 short sentences on what it does and who it affects (max 350 characters)
+"headline": what changes for people, in 4-10 everyday words, sentence case, no period (max 70 characters). Like "Hospitals would have to give you an itemized bill"
+"tweet": one sentence that makes someone stop scrolling, leading with who it affects or what changes for them, in concrete terms (max 140 characters)
+"summary": 2-3 short, friendly sentences on what it does and who it affects (max 320 characters)
 
 Official name: {title}
 Status: {status}
@@ -420,8 +428,8 @@ def save(new):
     """Merge an update into the bill's record; only re-run the rewrite when the source or status changed."""
     path = f"{DATA}/bills/{new['id']}.json"
     rec = load(path, {"updates": []})
-    if (rec.get("source"), rec.get("stage")) != (new["source"], new["stage"]):
-        rec.update(rewrite(new))
+    if (rec.get("source"), rec.get("stage"), rec.get("v")) != (new["source"], new["stage"], PROMPT_VERSION):
+        rec.update(rewrite(new), v=PROMPT_VERSION)
     rec.update(new)
     rec["interest"] = interest(rec)
     u = {"date": new["date"], "short": new["stage"]["short"], "now": new["stage"]["now"]}
@@ -434,41 +442,53 @@ def save(new):
 # --- Website ----------------------------------------------------------------
 
 e = html.escape
-STEPS = ["Proposed", "Passed House or Senate", "Passed both", "Became law"]
+STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")  # logo, icons, social card (brand/build.py)
+MARK = open(os.path.join(STATIC, "favicon.svg")).read().replace("<svg ", '<svg aria-hidden="true" width="28" height="28" ', 1)
+STEPS = ["Proposed", "Halfway there", "Passed House & Senate", "It's law"]
 CSS = """
-:root{--ink:#1a1a1a;--muted:#5b5b5b;--line:#e4e1da;--bg:#fbfaf7;--accent:#1d4ed8;--done:#15803d}
+:root{--ink:#111827;--muted:#4b5563;--soft:#6b7280;--line:#e5e2db;--bg:#fbfaf7;--accent:#1d4ed8;--done:#15803d}
 *{box-sizing:border-box}
-body{margin:0;font:18px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}
-header,main,footer{max-width:46rem;margin:0 auto;padding:0 1.25rem}
-header{padding-top:1.25rem;display:flex;gap:1.25rem;align-items:baseline;flex-wrap:wrap}
-header nav a{color:var(--ink);text-decoration:none;font-weight:600}header nav{display:flex;gap:1rem}
-.brand{font-weight:800;font-size:1.25rem;color:var(--ink);text-decoration:none;margin-right:auto}.brand span{color:var(--accent)}
-h1{font-size:2rem;line-height:1.2;margin:.25rem 0 1rem}
-h2{font-size:1.1rem;margin:2.25rem 0 .5rem}
+body{margin:0;font:18px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--bg);-webkit-text-size-adjust:100%}
+.wrap{max-width:46rem;margin:0 auto;padding:0 1.25rem}
 a{color:var(--accent)}
-.eyebrow{color:var(--muted);font-size:.9rem;margin:2rem 0 0}.eyebrow a{color:var(--muted)}
-.lede{font-size:1.2rem}
+a:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:4px}
+.skip{position:absolute;left:-999px}.skip:focus{left:1rem;top:1rem;background:#fff;padding:.5rem 1rem;z-index:9}
+.top{background:#fff;border-bottom:1px solid var(--line)}
+.top .wrap{display:flex;align-items:center;gap:1rem;height:3.75rem}
+.brand{display:inline-flex;align-items:center;gap:.5rem;font-weight:800;font-size:1.2rem;letter-spacing:-.01em;color:var(--ink);text-decoration:none}
+.brand b{color:var(--accent);font-weight:800}
+.top .brand{margin-right:auto}
+.top nav{display:flex;gap:1.1rem}.top nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.95rem}.top nav a:hover{color:var(--accent)}
+.hero{padding:1.5rem 0 .25rem}.hero h1{font-size:2.4rem}
+h1{font-size:2rem;line-height:1.15;letter-spacing:-.015em;margin:1.75rem 0 .75rem}
+h2{font-size:1.15rem;margin:2.25rem 0 .5rem}
+.eyebrow{color:var(--soft);font-size:.9rem;margin:1.75rem 0 0}.eyebrow a{color:var(--soft)}
+.eyebrow+h1{margin-top:.25rem}
+.lede{font-size:1.2rem;color:#1f2937}
 .box{background:#fff;border:1px solid var(--line);border-radius:12px;padding:1rem 1.25rem}
 .box p{margin:.5rem 0}
 .tracker{list-style:none;padding:0;margin:0 0 1rem;display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem}
-.tracker li{font-size:.85rem;line-height:1.3;color:var(--muted);border-top:6px solid var(--line);padding-top:.4rem}
+.tracker li{font-size:.85rem;line-height:1.3;color:var(--soft);border-top:6px solid var(--line);padding-top:.4rem}
 .tracker li.done{border-color:var(--done);color:var(--ink)}
 .tracker li[aria-current]{font-weight:700}
 dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:0}
-dt{color:var(--muted)}dd{margin:0}
+dt{color:var(--soft)}dd{margin:0}
 .list{list-style:none;padding:0;margin:0}
 .list li{border-bottom:1px solid var(--line);padding:.8rem 0}
 .list a{font-weight:600;text-decoration:none;color:var(--ink)}.list a:hover{text-decoration:underline}
-.meta{display:block;color:var(--muted);font-size:.85rem}
+.meta{display:block;color:var(--soft);font-size:.85rem}
 .more{display:inline-block;margin-top:.75rem;font-weight:600}
 .grid{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.5rem}
 .grid a{display:block;background:#fff;border:1px solid var(--line);border-radius:10px;padding:.6rem .8rem;text-decoration:none;color:var(--ink);font-weight:600}
 .grid a:hover{border-color:var(--accent)}
 .official{display:inline-block;margin-top:2rem;font-weight:600}
-table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600}
-footer{color:var(--muted);font-size:.85rem;margin-top:3rem;padding-bottom:2rem}
-footer p{border-top:1px solid var(--line);padding-top:1rem}
-@media (max-width:32rem){h1{font-size:1.6rem}.tracker{grid-template-columns:1fr 1fr}}
+table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line)}th{color:var(--soft);font-weight:600}
+.site-foot{margin-top:3.5rem;padding-top:1.5rem;padding-bottom:2.5rem;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
+.foot{display:flex;flex-wrap:wrap;gap:1.25rem 2rem;justify-content:space-between}
+.foot p{margin:.4rem 0 0}
+.foot nav{display:flex;flex-wrap:wrap;gap:.4rem 1.1rem;max-width:25rem}.foot nav a{color:var(--muted)}
+.fine{font-size:.8rem;color:var(--soft);margin-top:1.25rem}
+@media (max-width:32rem){.hero h1{font-size:1.9rem}h1{font-size:1.6rem}.tracker{grid-template-columns:1fr 1fr}.top nav{gap:.8rem}.top nav a{font-size:.9rem}}
 """
 
 
@@ -477,18 +497,26 @@ def date(d, fmt="%b %-d, %Y"):
 
 
 def page(title, desc, body, path=""):
+    url = f"{SITE_URL}/{path}"
+    brand = f"{MARK}<span>Plain<b>Gov</b></span>"
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{e(title)}</title><meta name="description" content="{e(desc)}">
+<title>{e(title)}</title><meta name="description" content="{e(desc)}"><link rel="canonical" href="{url}">
+<link rel="icon" href="/favicon.ico" sizes="32x32"><link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest"><meta name="theme-color" content="#1d4ed8">
+<meta property="og:site_name" content="PlainGov"><meta property="og:type" content="website"><meta property="og:url" content="{url}">
 <meta property="og:title" content="{e(title)}"><meta property="og:description" content="{e(desc)}">
-<meta property="og:url" content="{SITE_URL}/{path}"><meta name="twitter:card" content="summary">
+<meta property="og:image" content="{SITE_URL}/og.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image"><meta name="twitter:site" content="@plaingov">
 <style>{CSS}</style><script defer src="/_vercel/insights/script.js"></script></head><body>
-<header><a class="brand" href="/">Plain<span>Gov</span></a><nav><a href="/us/">Congress</a><a href="/states/">States</a></nav></header>
-<main>{body}</main>
-<footer><p>Plain-English summaries are written with AI from official records and may leave out details.
-Sources: <a href="https://www.congress.gov">Congress.gov</a> and each state legislature's website
-(via <a href="https://github.com/openstates/openstates-scrapers">Open States' scrapers</a>).
-<a href="/status/">Data status</a> · <a href="https://github.com/redreceipt/plaingov">Code</a>.</p></footer>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="wrap"><a class="brand" href="/" aria-label="PlainGov home">{brand}</a>
+<nav aria-label="Main"><a href="/us/">Congress</a><a href="/states/">States</a><a href="/about/">About</a></nav></div></header>
+<main id="main" class="wrap">{body}</main>
+<footer class="site-foot wrap"><div class="foot"><div><a class="brand" href="/">{brand}</a><p>Government, in plain English. Free and nonpartisan.</p></div>
+<nav aria-label="Footer"><a href="/us/">Congress</a><a href="/states/">States</a><a href="/about/">About</a><a href="/status/">Data status</a>
+<a href="/privacy/">Privacy</a><a href="https://x.com/plaingov">Follow us on X</a><a href="mailto:hello@plaingov.com">Contact</a></nav></div>
+<p class="fine">We use AI to turn official bill text into plain English. It can miss things, so check the official link on each page before you rely on it. This isn't legal advice. © {time.strftime('%Y')} PlainGov.</p></footer>
 </body></html>
 """
 
@@ -508,8 +536,8 @@ def newest(recs, n):
 
 def by_stage(recs, where):
     """List page body: newest first within plain-language stage groups."""
-    groups = [("Became law", lambda s: s["step"] == 3), ("Vetoed", lambda s: "eto" in s["short"]),
-              ("Passed both chambers", lambda s: s["step"] == 2), ("Passed the House or Senate", lambda s: s["step"] == 1),
+    groups = [("New laws", lambda s: s["step"] == 3), ("Vetoed", lambda s: "eto" in s["short"]),
+              ("Waiting on a signature", lambda s: s["step"] == 2), ("Halfway there", lambda s: s["step"] == 1),
               ("Just proposed", lambda s: s["step"] == 0)]
     out, left = "", recs
     for name, match in groups:
@@ -517,75 +545,163 @@ def by_stage(recs, where):
         left = [r for r in left if r not in hit]
         if hit:
             out += f"<h2>{name}</h2>" + items(newest(hit, 25), where)
-    return out or "<p>No updates yet. Check back soon.</p>"
+    return out or "<p>Nothing new here yet. We check every day, so come back soon.</p>"
 
 
 def bill_page(r):
     st = r["stage"]
     if r["resolution"]:
         where = "House" if r["label"].startswith("H") else "Senate"
-        track = f"<p>This is a resolution. It states the {where}'s position and doesn't become law.</p>"
+        track = f"<p>This is a resolution: basically the {where} saying where it stands. It doesn't become a law.</p>"
     else:
         track = "<ol class=tracker>" + "".join(
             f"<li{' class=done' if i <= st['step'] else ''}{' aria-current=step' if i == st['step'] else ''}>{s}</li>"
             for i, s in enumerate(STEPS)) + "</ol>"
     nxt = f"<p><strong>What's next:</strong> {e(st['next'])}</p>" if st["next"] else ""
-    sponsor = f"<dt>Proposed by</dt><dd>{e(r['sponsor'])}</dd>" if r.get("sponsor") else ""
+    sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}</dd>" if r.get("sponsor") else ""
     history = ""
     if len(r["updates"]) > 1:
-        history = "<h2>History</h2><ul class=list>" + "".join(
+        history = "<h2>How it got here</h2><ul class=list>" + "".join(
             f"<li>{e(u['now'])}<span class=meta>{date(u['date'])}</span></li>" for u in reversed(r["updates"])) + "</ul>"
     home = f"/states/{r['state'].lower()}/" if r.get("state") else "/us/"
     host = urllib.parse.urlparse(r["official_url"]).netloc.removeprefix("www.")
+    credit = "<p class=meta>Bill status from <a href=\"https://legiscan.com\">LegiScan</a> (CC BY 4.0).</p>" if "legiscan.com" in host else ""
     body = f"""<p class=eyebrow><a href="{home}">{e(r['where'])}</a> · {e(r['label'])}</p>
 <h1>{e(r['headline'])}</h1>
 <p class=lede>{e(r['summary'])}</p>
-<h2>Where it stands</h2>
-<div class=box>{track}<p><strong>Latest:</strong> {e(st['now'])} <span class=meta>{date(r['date'])}</span></p>{nxt}</div>
-<h2>Details</h2>
+<h2>Where it's at</h2>
+<div class=box>{track}<p><strong>What just happened:</strong> {e(st['now'])} <span class=meta>{date(r['date'])}</span></p>{nxt}</div>
+<h2>The basics</h2>
 <dl><dt>Bill number</dt><dd>{e(r['label'])}</dd><dt>Official name</dt><dd>{e(r['title'])}</dd>{sponsor}</dl>
 {history}
-<a class=official href="{e(r['official_url'])}">Read the full bill on {e(host)} →</a>"""
+<a class=official href="{e(r['official_url'])}">Read the full bill on {e(host)} →</a>{credit}"""
     return page(f"{r['headline']} · PlainGov", r["summary"], body, r["id"] + "/")
 
 
+ABOUT = """<h1>About PlainGov</h1>
+<p class=lede>Government moves fast and talks funny. PlainGov keeps up with it for you and explains it in normal words.</p>
+<h2>What we do</h2>
+<p>Every day we check Congress and all 50 state legislatures for bills that are moving: ones that just passed a vote, got signed into law,
+or got vetoed. Then we explain each one in a few plain sentences, with a simple tracker so you can see where it's at.</p>
+<h2>Where it comes from</h2>
+<p>Straight from the source: <a href="https://www.congress.gov">Congress.gov</a> for Congress, and each state legislature's own website
+for the states, using the open-source <a href="https://github.com/openstates/openstates-scrapers">Open States</a> scrapers. For a few states
+whose websites block automated visitors, we use <a href="https://legiscan.com">LegiScan</a> (CC BY 4.0). Every page links to the official bill.</p>
+<h2>How we use AI</h2>
+<p>AI (Anthropic's Claude) rewrites the official text in plain English. Another AI model (jev) helps us pick the stories most people would care
+about for <a href="https://x.com/plaingov">our X account</a>. AI can get things wrong or leave things out, so if a bill matters to you,
+check the official link. This isn't legal advice.</p>
+<h2>We don't take sides</h2>
+<p>We won't tell you what to think. We just explain what a bill does and where it stands, whoever proposed it.</p>
+<h2>Say hi</h2>
+<p>Spotted a mistake or have an idea? Email <a href="mailto:hello@plaingov.com">hello@plaingov.com</a> or find us on X at
+<a href="https://x.com/plaingov">@plaingov</a>. Our code is open on <a href="https://github.com/redreceipt/plaingov">GitHub</a>, and you can see
+how fresh our data is on the <a href="/status/">data status</a> page.</p>"""
+
+PRIVACY = """<h1>Privacy</h1>
+<p class=lede>Short version: we don't track you.</p>
+<p>No accounts, no ads, no cookies. We count visits with <a href="https://vercel.com/docs/analytics/privacy-policy">Vercel Web Analytics</a>,
+which doesn't use cookies or store personal info. It just tells us things like how many people visited and which pages they read.</p>
+<p>If you email us, we'll only use your email to write back.</p>
+<p>Questions? Email <a href="mailto:hello@plaingov.com">hello@plaingov.com</a>.</p>
+<p class=meta>Last updated October 23, 2026.</p>"""
+
+NOT_FOUND = """<h1>Hmm, that page doesn't exist.</h1>
+<p class=lede>It may have moved, or the link might be a little off.</p>
+<p><a class=more href="/">Go to the home page →</a></p>"""
+
+
 def build_site():
+    site = f"{DATA}/site"
     recs = [json.load(open(p)) for p in glob.glob(f"{DATA}/bills/**/*.json", recursive=True)]
     for r in recs:
-        write(f"{DATA}/site/{r['id']}/index.html", bill_page(r))
+        write(f"{site}/{r['id']}/index.html", bill_page(r))
     us = [r for r in recs if not r.get("state")]
     states = [r for r in recs if r.get("state")]
     week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
     top = sorted((r for r in recs if r["date"] >= week), key=lambda r: r.get("interest", 0), reverse=True)[:6]
-    body = f"""<h1>What your government is doing, in plain English</h1>
-<p class=lede>New laws and bills from Congress and all 50 states, explained without the jargon.</p>
-{'<h2>Top stories this week</h2>' + items(top) if top else ''}
-<h2>Congress</h2>{items(newest(us, 6), False)}<a class=more href="/us/">More from Congress →</a>
-<h2>The states</h2>{items(newest(states, 8))}<a class=more href="/states/">All 50 states →</a>"""
-    write(f"{DATA}/site/index.html", page("PlainGov", "What your government is doing, in plain English.", body))
-    write(f"{DATA}/site/us/index.html", page("Congress · PlainGov", "What Congress is doing, in plain English.",
-                                             "<h1>Congress</h1><p class=lede>Bills in the U.S. House and Senate, newest first.</p>" + by_stage(us, False), "us/"))
+    home = f"""<section class=hero><h1>What's going on in government, in plain English.</h1>
+<p class=lede>New bills and laws from Congress and all 50 states, explained like a friend would. No jargon, no spin.</p></section>
+{'<h2>Biggest stories this week</h2>' + items(top) if top else ''}
+<h2>Latest from Congress</h2>{items(newest(us, 6), False)}<a class=more href="/us/">See everything from Congress →</a>
+<h2>Latest from the states</h2>{items(newest(states, 8))}<a class=more href="/states/">Pick your state →</a>"""
+    pages = {
+        "": ("PlainGov: Government, in plain English", "New bills and laws from Congress and all 50 states, explained like a friend would.", home),
+        "us/": ("Congress · PlainGov", "What Congress is up to, in plain English.",
+                "<h1>Congress</h1><p class=lede>What the U.S. House and Senate are working on, newest first.</p>" + by_stage(us, False)),
+        "about/": ("About · PlainGov", "What PlainGov is, where our info comes from, and how we use AI.", ABOUT),
+        "privacy/": ("Privacy · PlainGov", "We don't track you. Here's the short version.", PRIVACY),
+        "status/": ("Data status · PlainGov", "How fresh our info is for each state.", status_body(load(HEALTH, {}))),
+    }
     counts = {st: sum(r["state"] == st for r in states) for st in STATES}
     grid = "".join(f"<li><a href=\"/states/{st.lower()}/\">{n}<span class=meta>{counts[st] or 'No'} recent update{'' if counts[st] == 1 else 's'}</span></a></li>"
                    for st, n in sorted(STATES.items(), key=lambda kv: kv[1]))
-    write(f"{DATA}/site/states/index.html", page("The states · PlainGov", "What all 50 state legislatures are doing, in plain English.",
-                                                 f"<h1>The states</h1><p class=lede>Pick a state to see what its lawmakers passed.</p><ul class=grid>{grid}</ul>", "states/"))
+    pages["states/"] = ("Pick your state · PlainGov", "What lawmakers in all 50 states are voting on, in plain English.",
+                        f"<h1>Pick your state</h1><p class=lede>See what lawmakers in your state have been voting on.</p><ul class=grid>{grid}</ul>")
     for st, n in STATES.items():
-        write(f"{DATA}/site/states/{st.lower()}/index.html", page(f"{n} · PlainGov", f"What the {n} legislature is doing, in plain English.",
-              f"<p class=eyebrow><a href=\"/states/\">The states</a></p><h1>{n}</h1><p class=lede>Bills that passed a vote in the {n} legislature, newest first.</p>"
-              + by_stage([r for r in states if r["state"] == st], False), f"states/{st.lower()}/"))
-    write(f"{DATA}/site/status/index.html", page("Data status · PlainGov", "How fresh PlainGov's data is for each legislature.", status_body(load(HEALTH, {})), "status/"))
+        pages[f"states/{st.lower()}/"] = (f"{n} · PlainGov", f"What {n} lawmakers are voting on, in plain English.",
+            f"<p class=eyebrow><a href=\"/states/\">All states</a></p><h1>{n}</h1><p class=lede>What {n} lawmakers have been voting on lately.</p>"
+            + by_stage([r for r in states if r["state"] == st], False))
+    for path, (title, desc, body) in pages.items():
+        write(f"{site}/{path}index.html", page(title, desc, body, path))
+    write(f"{site}/404.html", page("Page not found · PlainGov", "That page doesn't exist.", NOT_FOUND))
+    shutil.copytree(STATIC, site, dirs_exist_ok=True)
+    write(f"{site}/site.webmanifest", json.dumps({"name": "PlainGov", "short_name": "PlainGov", "start_url": "/", "display": "browser",
+          "theme_color": "#1d4ed8", "background_color": "#fbfaf7", "icons": [{"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}]}))
+    write(f"{site}/robots.txt", f"User-agent: *\nAllow: /\nSitemap: {SITE_URL}/sitemap.xml\n")
+    urls = list(pages) + [r["id"] + "/" for r in recs]
+    write(f"{site}/sitemap.xml", '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+          + "".join(f"<url><loc>{SITE_URL}/{u}</loc></url>" for u in urls) + "</urlset>\n")
 
 
 def status_body(health):
-    label = {"ok": "Up to date", "running": "Checking now", "failed": "Having trouble", "needs setup": "Coming soon"}
+    label = {"ok": "All good", "running": "Checking now", "failed": "Having trouble", "needs setup": "Coming soon"}
     rows = "".join(
         f"<tr><td><a href=\"/states/{st.lower()}/\">{n}</a></td><td>{label.get(h.get('status'), 'Not checked yet')}</td>"
         f"<td>{time.strftime('%b %-d, %-I:%M %p UTC', time.gmtime(h['last_ok'])) if h.get('last_ok') else '—'}</td><td>{h.get('bills', '—')}</td></tr>"
         for st, n, h in sorted(((st, n, health.get(st, {})) for st, n in STATES.items()), key=lambda x: x[1]))
-    return ("<h1>Data status</h1><p class=lede>We check every state legislature's website about once a day. "
-            "If a site is down or changes, we get an alert and fix it.</p>"
-            f"<table><thead><tr><th>State</th><th>Status</th><th>Last good check</th><th>Bills tracked</th></tr></thead><tbody>{rows}</tbody></table>")
+    return ("<h1>Is everything working?</h1><p class=lede>We check every state legislature's website about once a day. "
+            "If a site goes down or changes, we get pinged and fix it.</p>"
+            f"<table><thead><tr><th>State</th><th>Status</th><th>Last good check</th><th>Bills we're tracking</th></tr></thead><tbody>{rows}</tbody></table>")
+
+
+def rebuild():
+    """Rewrite every page from scratch after a prompt or copy change: Congress refetched, states from their last scrape on disk."""
+    shutil.rmtree(f"{DATA}/bills", ignore_errors=True)
+    for f in glob.glob(f"{DATA}/state/congress.json") + glob.glob(f"{DATA}/state/states-*.json"):
+        os.remove(f)
+    process("congress", congress_items(BACKFILL_DAYS), congress_update)
+    health = load(HEALTH, {})
+    for st in STATES:
+        if health.get(st, {}).get("status") == "ok" and scraped(st):
+            process(f"states-{st.lower()}", state_items(st), state_update)
+
+
+def serve():
+    """Static site on :8000 (exe.dev proxy -> Vercel) with our own 404 page and short CDN caching."""
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    site = f"{DATA}/site"
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=site, **k)
+
+        def end_headers(self):
+            self.send_header("Cache-Control", "public, max-age=300")
+            super().end_headers()
+
+        def send_error(self, code, message=None, explain=None):
+            if code != 404 or not os.path.exists(f"{site}/404.html"):
+                return super().send_error(code, message, explain)
+            body = open(f"{site}/404.html", "rb").read()
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+    ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
 
 
 # --- X ----------------------------------------------------------------------
@@ -690,4 +806,4 @@ if __name__ == "__main__":
     cmd, arg = sys.argv[1], (sys.argv[2:] or [None])[0]
     if cmd == "congress":
         sys.exit(1 if process("congress", congress_items(), congress_update)[2] else 0)
-    {"site": build_site, "post": post, "scrape": lambda: scrape(arg)}[cmd]()
+    {"site": build_site, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "rebuild": rebuild}[cmd]()

@@ -4,11 +4,11 @@ rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": 
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
        "sponsor": "Sen. Jane Doe (D-NH)", "date": "2026-05-21", "stage": us_stage("Introduced in Senate"), "milestone": False,
        "headline": "Funds counselors <b>in</b> schools", "tweet": "word " * 100, "summary": "Gives states grants.",
-       "updates": [{"date": "2026-05-21", "short": "Proposed in the Senate", "now": "A senator proposed it."}]}
+       "updates": [{"date": "2026-05-21", "short": "Just proposed", "now": "A senator just proposed it."}]}
 
 # Non-milestone posts carry no link; milestone posts link to our page. Both stay within 280 (links count 23, "…" 2).
 t = tweet_text(rec)
-assert "http" not in t and t.endswith("…\n\nS. 4618 · Proposed in the Senate (May 21)") and len(t) + 1 <= 280, t
+assert "http" not in t and t.endswith("…\n\nS. 4618 · Just proposed (May 21)") and len(t) + 1 <= 280, t
 url = "https://plaingov.com/us/119-s-4618/"
 t = tweet_text({**rec, "milestone": True})
 assert t.endswith("\n" + url) and len(t) - len(url) + 23 + 1 <= 280, t
@@ -20,7 +20,7 @@ assert "<li class=done aria-current=step>Proposed</li>" in p and 'href="/us/"' i
 
 assert us_stage("Passed House")["short"] == "Passed the House"
 assert us_stage("Senate agreed to House amendment")["step"] == 2
-assert us_stage("Public Law")["short"] == "Became law"
+assert us_stage("Public Law")["short"] == "It's law"
 assert sponsor_name("Rep. Smith, John [R-TX-5]") == "Rep. John Smith (R-TX)"
 
 # State milestones come from Open States action classifications.
@@ -34,7 +34,7 @@ assert bill_stage({"actions": both + [act("2026-03-09", ["executive-veto"], GOV)
 assert bill_stage({"actions": both + [act("2026-03-05", ["executive-signature"], GOV)]}) == (4, None, "2026-03-05")
 assert bill_stage({"actions": [act("2026-02-01T00:00:00", ["passage"], '~{"classification": "legislature"}')]})[0] == 3  # Nebraska
 
-assert state_stage("CA", 2, "upper")["next"] == "The Assembly needs to pass it too."
+assert state_stage("CA", 2, "upper")["next"] == "Now the Assembly has to say yes too."
 assert state_stage("TX", 2, "lower")["short"] == "Passed the House"
 assert state_stage("SC", 5)["short"] == "Vetoed"
 
@@ -43,10 +43,10 @@ s = state_update({"state": "SC", "status": (4, None, "2026-09-01"), "identifier"
                   "sources": [{"url": "https://www.scstatehouse.gov/billsearch.php?billnumbers=3305"}],
                   "sponsorships": [{"name": "Newton", "primary": True, "entity_type": "person"},
                                    {"name": "Bannister", "primary": True, "entity_type": "person"}]})
-assert (s["id"], s["label"], s["sponsor"], s["stage"]["short"]) == ("states/sc/2025-2026-h-3305", "H 3305", "Rep. Newton and 1 other", "Became law"), s
+assert (s["id"], s["label"], s["sponsor"], s["stage"]["short"]) == ("states/sc/2025-2026-h-3305", "H 3305", "Rep. Newton and 1 other", "It's law"), s
 
 law = {**rec, "id": "a", "stage": us_stage("Public Law")}
 html = by_stage([rec, law], False)
-assert html.index("Became law") < html.index("Just proposed"), html
+assert html.index("New laws") < html.index("Just proposed"), html
 assert "Having trouble" in status_body({"SC": {"status": "failed"}}) and "Coming soon" in status_body({"CA": {"status": "needs setup"}})
 print("ok")
