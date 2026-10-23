@@ -142,6 +142,14 @@ def sc_rows(page):
                                        "date": iso(veto_date) or iso(gov_date) or iso(ratified)}
 
 
+def sc_sponsor(by, chamber):
+    """'Erickson , G.M. Smith and Davis' -> 'Rep. Erickson and 2 others'"""
+    names = [n.strip() for n in re.split(r",|\band\b", by) if n.strip()]
+    first = names[0] if "Committee" in names[0] else f"{'Rep.' if chamber == 'H' else 'Sen.'} {names[0]}"
+    more = len(names) - 1
+    return first + (f" and {more} other{'s' if more > 1 else ''}" if more else "")
+
+
 def sc_items():
     yield from sc_rows(fetch(SC + "/rats2.php"))
 
@@ -155,7 +163,7 @@ def sc_update(r):
     return {
         "id": f"sc/{session}-{chamber.lower()}-{num}", "where": "South Carolina",
         "label": f"{chamber}. {num}", "resolution": False, "title": r["summary"], "official_url": r["url"],
-        "sponsor": strip(by.group(1)) if by else None, "date": r["date"], "stage": r["stage"],
+        "sponsor": sc_sponsor(strip(by.group(1)), chamber) if by else None, "date": r["date"], "stage": r["stage"],
         "source": re.sub(r"\s*-\s*RATIFIED TITLE$", "", strip(title.group(1))),
     }
 
@@ -174,7 +182,7 @@ Rules:
 Reply with only a JSON object with these keys:
 "headline": what it does in 4-9 words, sentence case, no period (max 70 characters)
 "tweet": one plain sentence about what it does (max 140 characters)
-"summary": 1-3 short sentences on what it does and who it affects (max 400 characters)
+"summary": at most 3 short sentences on what it does and who it affects (max 350 characters)
 
 Official name: {title}
 Source: {source}"""
