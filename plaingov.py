@@ -1,31 +1,42 @@
 #!/usr/bin/env python3
-"""PlainGov: bill updates in plain English, as a website and X posts.
+"""PlainGov: what your government is doing, in plain English.
 
-Usage: plaingov.py congress|sc   fetch new updates, rewrite them, rebuild the site, post to X
-       plaingov.py site          rebuild the site only
+Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post queue
+       plaingov.py states     new milestones in all 50 state legislatures (LegiScan) -> pages + post queue
+       plaingov.py post       post the most interesting queued update to X (@plaingov)
+       plaingov.py site       rebuild the site only
 
-A feed's first run builds pages for everything currently listed but posts nothing.
+A feed's first run builds pages for what's already listed (states: last BACKFILL_DAYS) and queues no posts.
 DRY_RUN=1 (default) prints posts instead of sending them.
 """
 import base64, glob, hashlib, hmac, html, json, os, re, secrets, sys, time, urllib.parse, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 DATA = os.environ.get("DATA_DIR", os.path.expanduser("~/plaingov-data"))
-SITE_URL = os.environ.get("SITE_URL", "https://plaingov.exe.xyz").rstrip("/")
-MAX_POSTS = int(os.environ.get("MAX_POSTS", "5"))
+SITE_URL = os.environ.get("SITE_URL", "https://plaingov.com").rstrip("/")
 DRY_RUN = os.environ.get("DRY_RUN", "1") != "0"
 LLM_MODEL = os.environ.get("LLM_MODEL", "claude-haiku-5-5")
+JEV_MODEL = os.environ.get("JEV_MODEL", "jev-1.13-free")
+MAX_POSTS_PER_DAY = int(os.environ.get("MAX_POSTS_PER_DAY", "6"))
+MIN_INTEREST = float(os.environ.get("MIN_INTEREST", "1.5"))  # jev score, 0-4
+BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "60"))
+POLL_HOURS = float(os.environ.get("POLL_HOURS", "2"))  # per state; keeps LegiScan under 30k queries/month
 UA = "plaingov-bot/1.0 (+https://github.com/redreceipt/plaingov)"
 URL_LEN = 23  # X counts every link as 23 chars
 
 
 def fetch(url, data=None, headers={}):
     req = urllib.request.Request(url, data=data, headers={"User-Agent": UA, **headers})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=120) as r:
         return r.read().decode(r.headers.get_content_charset() or "utf-8", "replace")
 
 
 def strip(s):
     return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", s)).split())
+
+
+def load(path, default):
+    return json.load(open(path)) if os.path.exists(path) else default
 
 
 def write(path, text):
@@ -96,101 +107,95 @@ def congress_update(s):
         st["next"] = ""
     sponsors = api(f"bill/{b['congress']}/{t.lower()}/{b['number']}")["bill"].get("sponsors") or [{}]
     return {
-        "id": f"us/{b['congress']}-{t.lower()}-{b['number']}", "where": "U.S. Congress",
+        "id": f"us/{b['congress']}-{t.lower()}-{b['number']}", "where": "U.S. Congress", "state": None,
         "label": f"{label} {b['number']}", "resolution": t in RESOLUTIONS, "title": b["title"],
         "official_url": f"https://www.congress.gov/bill/{ordinal(b['congress'])}-congress/{slug}/{b['number']}",
         "sponsor": sponsor_name(sponsors[0].get("fullName")), "date": s["actionDate"], "stage": st,
-        "source": strip(s["text"]),
+        "milestone": st["step"] >= 1, "source": strip(s["text"]),
     }
 
 
-# --- South Carolina -------------------------------------------------------
+# --- States (LegiScan) -------------------------------------------------------
 
-SC = "https://www.scstatehouse.gov"
-GOV = {
-    "": stage(2, "Passed the Legislature", "The SC House and Senate both passed it.", "The Governor decides whether to sign it."),
-    "S": stage(3, "Signed into law", "The Governor signed it. It's now law."),
-    "V": stage(2, "Vetoed", "The Governor rejected (vetoed) it.",
-               "Lawmakers can still make it law if two-thirds of both the House and Senate vote to override the veto."),
-    "NSR": stage(3, "Final", "Lawmakers passed it. It didn't need the Governor's signature."),
-    "U": stage(3, "Became law", "It became law without the Governor's signature."),
-    "Certain items vetoed": stage(3, "Signed, with cuts", "The Governor signed it but rejected some parts (line-item vetoes).",
-                                  "Lawmakers can vote to restore the rejected parts."),
+STATES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California", "CO": "Colorado",
+    "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana",
+    "ME": "Maine", "MD": "Maryland", "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
+    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota",
+    "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
+    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
 }
-VETO = {
-    "O": stage(3, "Became law over veto", "Lawmakers overrode the Governor's veto, so it's now law."),
-    "S": stage(2, "Veto stands", "Lawmakers didn't override the Governor's veto, so it won't become law."),
-}
+ASSEMBLY = {"CA", "NV", "NY", "NJ", "WI"}  # lower chamber is called the Assembly
+STATE_RESOLUTION = re.compile(r"^[HSA]C?R\d")  # HR, SR, HCR, ACR...: positions/commemorations, never law
 
 
-def iso(us_date):
-    m = re.match(r"(\d\d)/(\d\d)/(\d{4})$", us_date)
-    return f"{m[3]}-{m[1]}-{m[2]}" if m else ""
+def legiscan(**params):
+    q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], **params})
+    r = json.loads(fetch(f"https://api.legiscan.com/?{q}"))
+    if r.get("status") != "OK":
+        raise RuntimeError(f"LegiScan {params}: {r.get('alert', r)}")
+    return r
 
 
-def sc_rows(page):
-    """Rows of the official Ratifications/Acts log: bills that passed both chambers, plus governor actions."""
-    for row in re.findall(r"<tr>(.*?)</tr>", page, re.S):
-        link = re.search(r'href="(/billsearch\.php\?[^"]+)"', row)
-        cells = [strip(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
-        if not link or len(cells) != 10:
-            continue
-        bill, summary, ratified, gov, gov_date, veto, veto_date = cells[1], cells[3], cells[4], cells[5], cells[6], cells[7], cells[8]
-        st = dict(VETO.get(veto) or GOV.get(gov) or stage(2, gov, gov))
-        url = SC + html.unescape(link.group(1))
-        yield f"{url}|{st['short']}", {"bill": bill, "summary": summary, "url": url, "stage": st,
-                                       "date": iso(veto_date) or iso(gov_date) or iso(ratified)}
-
-
-def sc_sponsor(by, chamber):
-    """'Erickson , G.M. Smith and Davis' -> 'Rep. Erickson and 2 others'"""
-    if "Committee" in by:  # e.g. "House Ways and Means Committee"
-        return by
-    names = [n.strip() for n in re.split(r",|\band\b", by) if n.strip()]
-    first = f"{'Rep.' if chamber == 'H' else 'Sen.'} {names[0]}"
-    more = len(names) - 1
-    return first + (f" and {more} other{'s' if more > 1 else ''}" if more else "")
-
-
-def sc_items():
-    yield from sc_rows(fetch(SC + "/rats2.php"))
-
-
-def sc_update(r):
-    page = fetch(r["url"])
-    title = re.sub(r"\s*-\s*RATIFIED TITLE$", "", strip(re.search(r"<b>Summary:</b>.*?<br>(.*?)<br>", page, re.S).group(1)))
-    by = re.search(r"(?:Bill|Resolution), By (.*?)<br>", page, re.S)
-    # The title alone is often too thin ("SO AS TO MAKE CERTAIN CHANGES"), so rewrite from the bill text.
-    link = re.search(r'href="(/sess[^"]+/bills/\d+\.htm)"', page, re.I)
-    text = strip(re.sub(r"<(s|strike|del)\b.*?</\1>", " ", fetch(SC + link.group(1)), flags=re.S | re.I)) if link else ""
-    start = text.find(title[:40])
-    # shortcut: first 12k chars only; huge bills (budgets) get summarized from their opening sections
-    source = text[start:start + 12000] if start >= 0 else title
-    num, session = re.search(r"billnumbers=(\d+)&session=(\d+)", r["url"]).groups()
-    chamber = r["bill"][0]
+def state_stage(st, number, status):
+    """LegiScan status: 2 passed one chamber, 3 passed both, 4 became law, 5 vetoed."""
+    lower = "Assembly" if st in ASSEMBLY else "House"
+    ch = "Legislature" if st == "NE" else "Senate" if number.startswith("S") else lower
+    other = {"Senate": lower, "Legislature": ""}.get(ch, "Senate")
     return {
-        "id": f"sc/{session}-{chamber.lower()}-{num}", "where": "South Carolina",
-        "label": f"{chamber}. {num}", "resolution": False, "title": r["summary"], "official_url": r["url"],
-        "sponsor": sc_sponsor(strip(by.group(1)), chamber) if by else None, "date": r["date"], "stage": r["stage"],
-        "source": source,
+        2: stage(1, f"Passed the {ch}", f"The {ch} voted to pass it.", f"The {other} needs to pass it too." if other else ""),
+        3: stage(2, "Passed the Legislature", "Lawmakers passed it.", "The Governor decides whether to sign it."),
+        4: stage(3, "Became law", "It's now law."),
+        5: stage(2, "Vetoed", "The Governor rejected (vetoed) it.", "Lawmakers can still make it law by voting to override the veto."),
+    }[status]
+
+
+def states_items():
+    path = f"{DATA}/state/polled.json"
+    polled = load(path, {})
+    for st in STATES:
+        if time.time() - polled.get(st, 0) < POLL_HOURS * 3600:
+            continue
+        bills = [b for b in legiscan(op="getMasterList", state=st)["masterlist"].values() if isinstance(b, dict) and "bill_id" in b]
+        polled[st] = time.time()
+        write(path, json.dumps(polled))
+        for b in bills:
+            s = int(b.get("status") or 0)
+            if s in (2, 3, 4, 5) and not STATE_RESOLUTION.match(b["number"]):
+                yield f"{st}-{b['bill_id']}-{s}", {**b, "state": st}
+
+
+def state_update(b):
+    st, num = b["state"], b["number"]
+    year = b["url"].rstrip("/").rsplit("/", 1)[-1]
+    desc = b.get("description") or ""
+    return {
+        "id": f"states/{st.lower()}/{year}-{num.lower()}", "where": STATES[st], "state": st,
+        "label": re.sub(r"^([A-Z]+)(\d+)$", r"\1 \2", num), "resolution": False, "title": b["title"],
+        "official_url": b["url"], "sponsor": None, "date": b["status_date"],
+        "stage": state_stage(st, num, int(b["status"])), "milestone": True,
+        "source": b["title"] if desc in ("", b["title"]) else f"{b['title']}. {desc}",
     }
 
 
-# --- Plain-English rewrite --------------------------------------------------
+# --- AI: plain-English rewrite (Claude) and interest score (jev) ----------------
 
 PROMPT = """You write for PlainGov, which explains government to everyday people.
 Rewrite this {where} bill for a general audience, at about an 8th-grade reading level.
 
 Rules:
 - Use only facts in the source. Don't guess about effects, costs, or motives.
-- Neutral and nonpartisan. No opinions.
+- Neutral and nonpartisan. No opinions, hype words, emojis, or hashtags.
 - No jargon or legal terms (like "appropriations", "amend", "statute", "section 8-11-155", "local educational agency"). Say it the way you'd explain it to a neighbor.
 - Present tense. Start with a verb where natural ("Gives...", "Requires...").
 - If the source is brief, keep it brief and describe only what it says. Never mention the source or what it leaves out. Always reply with the JSON.
 
 Reply with only a JSON object with these keys:
 "headline": what it does in 4-9 words, sentence case, no period (max 70 characters)
-"tweet": one plain sentence about what it does (max 140 characters)
+"tweet": one sentence that makes a regular person stop scrolling: lead with who it affects or what changes for them, in concrete terms (max 140 characters)
 "summary": at most 3 short sentences on what it does and who it affects (max 350 characters)
 
 Official name: {title}
@@ -212,13 +217,27 @@ def rewrite(rec):
     return {k: out[k] for k in ("headline", "tweet", "summary")}
 
 
+INTEREST = {"type": "score", "instructions": "How interesting would a typical American find this government update in their social feed?",
+            "criteria": ["routine or ceremonial", "niche", "notable", "affects many people's daily lives or money", "major national news"]}
+
+
+def interest(rec):
+    """jev (TypeSafe's classifier, via OpenCode Zen; exe.dev's proxy adds the API key) scores 0-4."""
+    body = {"model": JEV_MODEL, "questions": {"interest": INTEREST},
+            "state": {"where": rec["where"], "status": rec["stage"]["short"], "headline": rec["headline"], "summary": rec["summary"]}}
+    r = json.loads(fetch("https://opencode.int.exe.xyz/inference/v1/systemone", json.dumps(body).encode(),
+                         {"content-type": "application/json"}))
+    return round(r["answers"]["interest"]["score"], 2)
+
+
 def save(new):
     """Merge an update into the bill's record; only re-run the rewrite when the source text changed."""
     path = f"{DATA}/bills/{new['id']}.json"
-    rec = json.load(open(path)) if os.path.exists(path) else {"updates": []}
+    rec = load(path, {"updates": []})
     if rec.get("source") != new["source"]:
         rec.update(rewrite(new))
     rec.update(new)
+    rec["interest"] = interest(rec)
     u = {"date": new["date"], "short": new["stage"]["short"], "now": new["stage"]["now"]}
     if u not in rec["updates"]:
         rec["updates"].append(u)
@@ -234,13 +253,14 @@ CSS = """
 :root{--ink:#1a1a1a;--muted:#5b5b5b;--line:#e4e1da;--bg:#fbfaf7;--accent:#1d4ed8;--done:#15803d}
 *{box-sizing:border-box}
 body{margin:0;font:18px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}
-header,main,footer{max-width:42rem;margin:0 auto;padding:0 1.25rem}
-header{padding-top:1.25rem}
-.brand{font-weight:800;font-size:1.25rem;color:var(--ink);text-decoration:none}.brand span{color:var(--accent)}
+header,main,footer{max-width:46rem;margin:0 auto;padding:0 1.25rem}
+header{padding-top:1.25rem;display:flex;gap:1.25rem;align-items:baseline;flex-wrap:wrap}
+header nav a{color:var(--ink);text-decoration:none;font-weight:600}header nav{display:flex;gap:1rem}
+.brand{font-weight:800;font-size:1.25rem;color:var(--ink);text-decoration:none;margin-right:auto}.brand span{color:var(--accent)}
 h1{font-size:2rem;line-height:1.2;margin:.25rem 0 1rem}
-h2{font-size:1.1rem;margin:2.25rem 0 .75rem}
+h2{font-size:1.1rem;margin:2.25rem 0 .5rem}
 a{color:var(--accent)}
-.eyebrow{color:var(--muted);font-size:.9rem;margin:2rem 0 0}
+.eyebrow{color:var(--muted);font-size:.9rem;margin:2rem 0 0}.eyebrow a{color:var(--muted)}
 .lede{font-size:1.2rem}
 .box{background:#fff;border:1px solid var(--line);border-radius:12px;padding:1rem 1.25rem}
 .box p{margin:.5rem 0}
@@ -254,6 +274,10 @@ dt{color:var(--muted)}dd{margin:0}
 .list li{border-bottom:1px solid var(--line);padding:.8rem 0}
 .list a{font-weight:600;text-decoration:none;color:var(--ink)}.list a:hover{text-decoration:underline}
 .meta{display:block;color:var(--muted);font-size:.85rem}
+.more{display:inline-block;margin-top:.75rem;font-weight:600}
+.grid{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.5rem}
+.grid a{display:block;background:#fff;border:1px solid var(--line);border-radius:10px;padding:.6rem .8rem;text-decoration:none;color:var(--ink);font-weight:600}
+.grid a:hover{border-color:var(--accent)}
 .official{display:inline-block;margin-top:2rem;font-weight:600}
 footer{color:var(--muted);font-size:.85rem;margin-top:3rem;padding-bottom:2rem}
 footer p{border-top:1px solid var(--line);padding-top:1rem}
@@ -261,8 +285,8 @@ footer p{border-top:1px solid var(--line);padding-top:1rem}
 """
 
 
-def date(d):
-    return time.strftime("%b %-d, %Y", time.strptime(d, "%Y-%m-%d")) if d else ""
+def date(d, fmt="%b %-d, %Y"):
+    return time.strftime(fmt, time.strptime(d, "%Y-%m-%d")) if d else ""
 
 
 def page(title, desc, body, path=""):
@@ -271,14 +295,41 @@ def page(title, desc, body, path=""):
 <title>{e(title)}</title><meta name="description" content="{e(desc)}">
 <meta property="og:title" content="{e(title)}"><meta property="og:description" content="{e(desc)}">
 <meta property="og:url" content="{SITE_URL}/{path}"><meta name="twitter:card" content="summary">
-<style>{CSS}</style></head><body>
-<header><a class="brand" href="/">Plain<span>Gov</span></a></header>
+<style>{CSS}</style><script defer src="/_vercel/insights/script.js"></script></head><body>
+<header><a class="brand" href="/">Plain<span>Gov</span></a><nav><a href="/us/">Congress</a><a href="/states/">States</a></nav></header>
 <main>{body}</main>
 <footer><p>Plain-English summaries are written with AI from official records and may leave out details.
-Sources: <a href="https://www.congress.gov">Congress.gov</a> and <a href="https://www.scstatehouse.gov">scstatehouse.gov</a>.
+Sources: <a href="https://www.congress.gov">Congress.gov</a> and <a href="https://legiscan.com">LegiScan</a> (CC BY 4.0).
 <a href="https://github.com/redreceipt/plaingov">Code</a>.</p></footer>
 </body></html>
 """
+
+
+def item(r, where=True):
+    return (f"<li><a href=\"/{r['id']}/\">{e(r['headline'])}</a><span class=meta>"
+            f"{e(r['where']) + ' · ' if where else ''}{e(r['label'])} · {e(r['stage']['short'])} · {date(r['date'])}</span></li>")
+
+
+def items(recs, where=True):
+    return "<ul class=list>" + "".join(item(r, where) for r in recs) + "</ul>"
+
+
+def newest(recs, n):
+    return sorted(recs, key=lambda r: r["date"], reverse=True)[:n]
+
+
+def by_stage(recs, where):
+    """List page body: newest first within plain-language stage groups."""
+    groups = [("Became law", lambda s: s["step"] == 3), ("Vetoed", lambda s: "eto" in s["short"]),
+              ("Passed both chambers", lambda s: s["step"] == 2), ("Passed the House or Senate", lambda s: s["step"] == 1),
+              ("Just proposed", lambda s: s["step"] == 0)]
+    out, left = "", recs
+    for name, match in groups:
+        hit = [r for r in left if match(r["stage"])]
+        left = [r for r in left if r not in hit]
+        if hit:
+            out += f"<h2>{name}</h2>" + items(newest(hit, 25), where)
+    return out or "<p>No updates yet. Check back soon.</p>"
 
 
 def bill_page(r):
@@ -296,8 +347,9 @@ def bill_page(r):
     if len(r["updates"]) > 1:
         history = "<h2>History</h2><ul class=list>" + "".join(
             f"<li>{e(u['now'])}<span class=meta>{date(u['date'])}</span></li>" for u in reversed(r["updates"])) + "</ul>"
+    home = f"/states/{r['state'].lower()}/" if r.get("state") else "/us/"
     host = urllib.parse.urlparse(r["official_url"]).netloc.removeprefix("www.")
-    body = f"""<p class=eyebrow>{e(r['where'])} · {e(r['label'])}</p>
+    body = f"""<p class=eyebrow><a href="{home}">{e(r['where'])}</a> · {e(r['label'])}</p>
 <h1>{e(r['headline'])}</h1>
 <p class=lede>{e(r['summary'])}</p>
 <h2>Where it stands</h2>
@@ -305,41 +357,54 @@ def bill_page(r):
 <h2>Details</h2>
 <dl><dt>Bill number</dt><dd>{e(r['label'])}</dd><dt>Official name</dt><dd>{e(r['title'])}</dd>{sponsor}</dl>
 {history}
-<a class=official href="{e(r['official_url'])}">Read the official record on {e(host)} →</a>"""
+<a class=official href="{e(r['official_url'])}">Read the full bill on {e(host)} →</a>"""
     return page(f"{r['headline']} · PlainGov", r["summary"], body, r["id"] + "/")
 
 
 def build_site():
-    recs = [json.load(open(p)) for p in glob.glob(f"{DATA}/bills/*/*.json")]
+    recs = [json.load(open(p)) for p in glob.glob(f"{DATA}/bills/**/*.json", recursive=True)]
     for r in recs:
         write(f"{DATA}/site/{r['id']}/index.html", bill_page(r))
-    sections = ""
-    for where in ("U.S. Congress", "South Carolina"):
-        items = sorted((r for r in recs if r["where"] == where), key=lambda r: r["date"], reverse=True)[:30]
-        sections += f"<h2>{where}</h2><ul class=list>" + "".join(
-            f"<li><a href=\"/{r['id']}/\">{e(r['headline'])}</a>"
-            f"<span class=meta>{e(r['label'])} · {e(r['stage']['short'])} · {date(r['date'])}</span></li>"
-            for r in items) + "</ul>"
+    us = [r for r in recs if not r.get("state")]
+    states = [r for r in recs if r.get("state")]
+    week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
+    top = sorted((r for r in recs if r["date"] >= week), key=lambda r: r.get("interest", 0), reverse=True)[:6]
     body = f"""<h1>What your government is doing, in plain English</h1>
-<p class=lede>New bills and updates from Congress and South Carolina, explained without the jargon.</p>{sections}"""
+<p class=lede>New laws and bills from Congress and all 50 states, explained without the jargon.</p>
+{'<h2>Top stories this week</h2>' + items(top) if top else ''}
+<h2>Congress</h2>{items(newest(us, 6), False)}<a class=more href="/us/">More from Congress →</a>
+<h2>The states</h2>{items(newest(states, 8))}<a class=more href="/states/">All 50 states →</a>"""
     write(f"{DATA}/site/index.html", page("PlainGov", "What your government is doing, in plain English.", body))
+    write(f"{DATA}/site/us/index.html", page("Congress · PlainGov", "What Congress is doing, in plain English.",
+                                             "<h1>Congress</h1><p class=lede>Bills in the U.S. House and Senate, newest first.</p>" + by_stage(us, False), "us/"))
+    counts = {st: sum(r["state"] == st for r in states) for st in STATES}
+    grid = "".join(f"<li><a href=\"/states/{st.lower()}/\">{n}<span class=meta>{counts[st] or 'No'} recent update{'' if counts[st] == 1 else 's'}</span></a></li>"
+                   for st, n in sorted(STATES.items(), key=lambda kv: kv[1]))
+    write(f"{DATA}/site/states/index.html", page("The states · PlainGov", "What all 50 state legislatures are doing, in plain English.",
+                                                 f"<h1>The states</h1><p class=lede>Pick a state to see what its lawmakers passed.</p><ul class=grid>{grid}</ul>", "states/"))
+    for st, n in STATES.items():
+        write(f"{DATA}/site/states/{st.lower()}/index.html", page(f"{n} · PlainGov", f"What the {n} legislature is doing, in plain English.",
+              f"<p class=eyebrow><a href=\"/states/\">The states</a></p><h1>{n}</h1><p class=lede>Bills that passed a vote in the {n} legislature, newest first.</p>"
+              + by_stage([r for r in states if r["state"] == st], False), f"states/{st.lower()}/"))
 
 
 # --- X ----------------------------------------------------------------------
 
 def tweet_text(r):
-    url = f"{SITE_URL}/{r['id']}/"
-    tail = f"{r['label']} · {r['stage']['short']} ({time.strftime('%b %-d', time.strptime(r['date'], '%Y-%m-%d'))})"
+    """Milestones (passed a chamber or further) link to the bill page; X charges much more for posts with links."""
+    head = f"{r['where']}: {r['headline']}"
+    tail = f"{r['label']} · {r['stage']['short']} ({date(r['date'], '%b %-d')})"
+    url = f"{SITE_URL}/{r['id']}/" if r["milestone"] else ""
+    room = 280 - len(head) - len(tail) - 4 - (URL_LEN + 1 if url else 0)  # 4 = blank-line separators
     body = r["tweet"]
-    room = 280 - len(r["headline"]) - len(tail) - URL_LEN - 5  # 5 = separator newlines
     if len(body) > room:  # "…" weighs 2 on X, hence room - 2
         body = body[: room - 2].rsplit(" ", 1)[0].rstrip(",;:") + "…"
-    return f"{r['headline']}\n\n{body}\n\n{tail}\n{url}"
+    return f"{head}\n\n{body}\n\n{tail}" + (f"\n{url}" if url else "")
 
 
-def post_x(text, prefix):
-    """POST /2/tweets with OAuth 1.0a user context (JSON bodies are not part of the signature)."""
-    env = lambda k: os.environ[f"{prefix}_{k}"]
+def post_x(text):
+    """POST /2/tweets as @plaingov with OAuth 1.0a user context (JSON bodies are not part of the signature)."""
+    env = lambda k: os.environ[f"X_{k}"]
     url = "https://api.x.com/2/tweets"
     q = lambda s: urllib.parse.quote(s, safe="")
     oauth = {"oauth_consumer_key": env("API_KEY"), "oauth_nonce": secrets.token_hex(16),
@@ -352,34 +417,61 @@ def post_x(text, prefix):
     return json.loads(fetch(url, json.dumps({"text": text}).encode(), {"Authorization": auth, "Content-Type": "application/json"}))
 
 
-FEEDS = {"congress": (congress_items, congress_update, "X_PLAINGOV"), "sc": (sc_items, sc_update, "X_PLAINGOVSC")}
+def post():
+    """Post the most interesting update from the last day, spacing posts evenly under MAX_POSTS_PER_DAY."""
+    qpath, lpath = f"{DATA}/state/queue.json", f"{DATA}/state/posts.json"
+    now = time.time()
+    queue = [q for q in load(qpath, []) if now - q["at"] < 86400]  # day-old news isn't news
+    log = load(lpath, [])
+    recent = [p for p in log if now - p["at"] < 86400]
+    best = max(queue, key=lambda q: q["interest"], default=None)
+    if not best or best["interest"] < MIN_INTEREST:
+        why = "nothing interesting enough"
+    elif len(recent) >= MAX_POSTS_PER_DAY or (recent and now - recent[-1]["at"] < 86400 / MAX_POSTS_PER_DAY - 300):
+        why = "waiting to spread posts out"
+    else:
+        rec = load(f"{DATA}/bills/{best['id']}.json", None)
+        text = tweet_text(rec)
+        tid = "dry-run" if DRY_RUN else post_x(text)["data"]["id"]
+        print(f"--- {'DRY RUN ' if DRY_RUN else ''}post {best['id']} (interest {best['interest']})\n{text}", flush=True)
+        log.append({"at": now, "id": best["id"], "tweet": tid})
+        write(lpath, json.dumps(log[-500:]))
+        queue = [q for q in queue if q["id"] != best["id"]]
+        why = "posted"
+    write(qpath, json.dumps(queue))
+    print(f"post: {why}; {len(queue)} queued, {len(recent)} posted in the last day")
+
+
+FEEDS = {"congress": (congress_items, congress_update), "states": (states_items, state_update)}
 
 
 def run(feed):
-    items, update, prefix = FEEDS[feed]
-    path = f"{DATA}/state/{feed}.json"
+    items, update = FEEDS[feed]
+    path, qpath = f"{DATA}/state/{feed}.json", f"{DATA}/state/queue.json"
     first = not os.path.exists(path)
-    seen = set() if first else set(json.load(open(path)))
+    seen = set(load(path, []))
     new = [(k, v) for k, v in dict(items()).items() if k not in seen]
-    failed = 0
-    for k, v in new if first else new[:MAX_POSTS]:
+    cutoff = time.strftime("%Y-%m-%d", time.gmtime(time.time() - BACKFILL_DAYS * 86400))
+    todo = [(k, v) for k, v in new if not first or v.get("status_date", "9999") >= cutoff]
+
+    def one(kv):
         try:
-            rec = save(update(v))
-            if not first:
-                t = tweet_text(rec)
-                print(f"--- {feed} {k}\n{t}" if DRY_RUN else f"posted {k}: {post_x(t, prefix)['data']['id']}", flush=True)
+            return kv[0], save(update(kv[1]))
         except Exception as ex:  # retried next run; one bad item shouldn't block the rest
-            failed += 1
-            print(f"FAILED {k}: {ex!r}", file=sys.stderr, flush=True)
-            continue
-        seen.add(k)
-        write(path, json.dumps(sorted(seen)))
-    if first:  # never post the backlog, even items whose page failed to build
-        write(path, json.dumps(sorted(k for k, _ in new)))
+            print(f"FAILED {kv[0]}: {ex!r}", file=sys.stderr, flush=True)
+
+    with ThreadPoolExecutor(6) as pool:
+        done = [d for d in pool.map(one, todo) if d]
+    seen |= {k for k, _ in (new if first else done)}  # a first run never retries or posts the backlog
+    write(path, json.dumps(sorted(seen)))
+    if not first:
+        queue = load(qpath, []) + [{"id": r["id"], "key": k, "interest": r["interest"], "at": time.time()} for k, r in done]
+        write(qpath, json.dumps(queue))
     build_site()
-    print(f"{feed}: {len(new)} new, {failed} failed{' (first run: pages only, no posts)' if first else ''}")
-    sys.exit(1 if failed else 0)
+    failed = len(todo) - len(done)
+    print(f"{feed}: {len(new)} new, {len(done)} pages updated, {failed} failed{' (first run: no posts queued)' if first else ''}")
+    sys.exit(1 if failed and not first else 0)
 
 
 if __name__ == "__main__":
-    build_site() if sys.argv[1] == "site" else run(sys.argv[1])
+    {"site": build_site, "post": post}.get(sys.argv[1], lambda: run(sys.argv[1]))()
