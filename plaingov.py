@@ -423,7 +423,7 @@ def scrape(only=None):
 
 # --- AI: plain-English rewrite (Claude) and interest score (jev) ----------------
 
-PROMPT_VERSION = 2  # bump to rewrite every page with a changed prompt (python3 plaingov.py rebuild)
+PROMPT_VERSION = 3  # bump to rewrite every page with a changed prompt (python3 plaingov.py rebuild)
 PROMPT = """You write for PlainGov, which explains government to regular people who don't follow politics.
 Explain this {where} bill the way you'd text a smart friend: casual, warm, and dead simple.
 
@@ -432,7 +432,7 @@ Rules:
 - Neutral and nonpartisan. No opinions, no hype, no slang, no emojis or hashtags.
 - Everyday words and short sentences, about a 6th-grade reading level. Say "you" when it affects the reader.
 - Zero jargon or legal terms (like "appropriations", "amend", "statute", "provisions", "section 8-11-155", "local educational agency"). If you must use a government word, explain it in a few words.
-- Match the status. Unless it's law, say what it would do ("would", "if it passes"); never imply it already happened.
+- Match the status in the headline, tweet, and summary. If it's law, say what it does now ("Hospitals now have to..."). If it isn't law yet, say what it would do ("would", "if it passes"); never imply it already happened.
 - If the source is brief, keep it brief and describe only what it says. Never mention the source or what it leaves out. Always reply with the JSON.
 
 Reply with only a JSON object with these keys:
@@ -682,8 +682,8 @@ def build_site():
     home = f"""<section class=hero><h1>What's going on in government, in plain English.</h1>
 <p class=lede>New bills and laws from Congress and all 50 states, explained like a friend would. No jargon, no spin.</p></section>
 {'<h2>Biggest stories this week</h2>' + items(top) if top else ''}
-<h2>Latest from Congress</h2>{items(newest(us, 6), False)}<a class=more href="/us/">See everything from Congress →</a>
-<h2>Latest from the states</h2>{items(newest(states, 8))}<a class=more href="/states/">Pick your state →</a>"""
+<h2>Latest from Congress</h2>{items(newest([r for r in us if r not in top], 6), False)}<a class=more href="/us/">See everything from Congress →</a>
+<h2>Latest from the states</h2>{items(newest([r for r in states if r not in top], 8))}<a class=more href="/states/">Pick your state →</a>"""
     pages = {
         "": ("PlainGov: Government, in plain English", "New bills and laws from Congress and all 50 states, explained like a friend would.", home),
         "us/": ("Congress · PlainGov", "What Congress is up to, in plain English.",
