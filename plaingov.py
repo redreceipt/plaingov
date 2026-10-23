@@ -178,7 +178,7 @@ Rules:
 - Neutral and nonpartisan. No opinions.
 - No jargon or legal terms (like "appropriations", "amend", "statute", "section 8-11-155", "local educational agency"). Say it the way you'd explain it to a neighbor.
 - Present tense. Start with a verb where natural ("Gives...", "Requires...").
-- If the source is brief, keep it brief and describe only what it says. Always reply with the JSON.
+- If the source is brief, keep it brief and describe only what it says. Never mention the source or what it leaves out. Always reply with the JSON.
 
 Reply with only a JSON object with these keys:
 "headline": what it does in 4-9 words, sentence case, no period (max 70 characters)
