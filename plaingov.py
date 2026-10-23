@@ -423,7 +423,7 @@ def scrape(only=None):
 
 # --- AI: plain-English rewrite (Claude) and interest score (jev) ----------------
 
-PROMPT_VERSION = 3  # bump to rewrite every page with a changed prompt (python3 plaingov.py rebuild)
+PROMPT_VERSION = 4  # bump to rewrite every page with a changed prompt (python3 plaingov.py rebuild)
 PROMPT = """You write for PlainGov, which explains government to regular people who don't follow politics.
 Explain this {where} bill the way you'd text a smart friend: casual, warm, and dead simple.
 
@@ -447,7 +447,9 @@ Source: {source}"""
 
 def rewrite(rec):
     body = json.dumps({"model": LLM_MODEL, "max_tokens": 600, "thinking": {"type": "disabled"},
-                       "messages": [{"role": "user", "content": PROMPT.format(**rec, status=rec["stage"]["now"])}]})
+                       "messages": [{"role": "user", "content": PROMPT.format(**rec, status=rec["stage"]["now"] + (
+                           " This IS law now: use present tense everywhere and never say 'would'." if rec["stage"]["step"] == 3
+                           else " This is NOT law yet: say what it would do."))}]})
     r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", body.encode(),
                          {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
     text = "".join(c["text"] for c in r["content"] if c["type"] == "text")
