@@ -24,7 +24,6 @@ SCRAPER_IMAGE = os.environ.get("SCRAPER_IMAGE", "openstates/scrapers:latest")
 PARALLEL = int(os.environ.get("PARALLEL", "12"))  # scrapers are network-bound (~85 MB, ~1% CPU each)
 RESCRAPE_HOURS = float(os.environ.get("RESCRAPE_HOURS", "20"))
 ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micneeley14@gmail.com")  # exe.dev only emails the VM owner
-HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "")  # Better Stack heartbeat: alerts if the scraper daemon goes quiet
 UA = "plaingov-bot/1.0 (+https://github.com/redreceipt/plaingov)"
 URL_LEN = 23  # X counts every link as 23 chars
 
@@ -334,12 +333,9 @@ def scrape(only=None):
         for st in due[:PARALLEL - len(running)]:
             running[st] = pool.submit(scrape_state, st)
         check_stale(health)
-        # Heartbeat only while scrapes are succeeding, so Better Stack catches both a dead daemon and a stuck one.
-        if HEARTBEAT_URL and (time.time() - started < 26 * 3600 or any(time.time() - h.get("last_ok", 0) < 26 * 3600 for h in health.values())):
-            try:
-                fetch(HEARTBEAT_URL)
-            except Exception as ex:
-                print(f"heartbeat failed: {ex!r}", file=sys.stderr, flush=True)
+        # Public heartbeat for the off-box watchdog (.github/workflows/watchdog.yml): daemon alive + states succeeding.
+        write(f"{DATA}/site/status/health.json", json.dumps({"updated": time.time(), "started": started, "states": {
+            st: {k: h.get(k) for k in ("status", "last_ok", "bills")} for st, h in health.items()}}))
         time.sleep(60)
 
 

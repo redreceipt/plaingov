@@ -33,14 +33,14 @@ Environment (`~/plaingov.env` on the VM, never committed):
 |---|---|
 | `CONGRESS_API_KEY` | [api.data.gov key](https://api.congress.gov/sign-up/) |
 | `NEW_YORK_API_KEY`, `INDIANA_API_KEY`, `VA_API_KEY` | free keys some state scrapers need |
-| `ALERT_EMAIL`, `HEARTBEAT_URL` | where scraper alerts go; Better Stack heartbeat for the daemon |
+| `ALERT_EMAIL` | where scraper alerts go (exe.dev only emails the VM owner) |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | @plaingov's OAuth 1.0a keys (read+write) |
 | `DRY_RUN` | `1` (default) prints posts instead of sending |
 | `MAX_POSTS_PER_DAY`, `MIN_INTEREST`, `BACKFILL_DAYS`, `PARALLEL`, `RESCRAPE_HOURS`, `SITE_URL`, `LLM_MODEL`, `JEV_MODEL`, `DATA_DIR` | optional overrides |
 
 ## Monitoring
 
-After every state scrape, `health.json` records status, bill counts, and errors, and [plaingov.com/status](https://plaingov.com/status/) shows it publicly. You get an email and a phone push (exe.dev) when a state's scraper fails, its bill count drops by half, it hasn't succeeded in 2 days, or it recovers. Each alert checks the legislature's website so it says whether their site is down or our scraper needs a fix. A Better Stack heartbeat alerts if the daemon itself dies or stops succeeding.
+After every state scrape, `health.json` records status, bill counts, and errors, and [plaingov.com/status](https://plaingov.com/status/) shows it publicly. You get an email and a phone push (exe.dev) when a state's scraper fails, its bill count drops by half, it hasn't succeeded in 2 days, or it recovers. Each alert checks the legislature's website so it says whether their site is down or our scraper needs a fix. An hourly GitHub Actions [watchdog](.github/workflows/watchdog.yml) fails (and GitHub emails you) if the site is down, the daemon stops writing `status/health.json`, or no state succeeds for a day, so it catches the VM itself dying.
 
 ## Deploy
 

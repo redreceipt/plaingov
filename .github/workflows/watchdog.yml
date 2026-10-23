@@ -1,0 +1,25 @@
+# Off-box watchdog: fails (and GitHub emails the repo owner) if the site is down,
+# the scraper daemon stopped checking in, or no state has scraped successfully in a day.
+name: watchdog
+on:
+  schedule: [{cron: "17 * * * *"}]
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          curl -fsS -o /dev/null https://plaingov.com/ || { echo "::error::plaingov.com is down"; exit 1; }
+          curl -fsS https://plaingov.com/status/health.json -o health.json || { echo "::error::health.json missing: scraper daemon not running"; exit 1; }
+          python3 - <<'PY'
+          import json, time
+          h = json.load(open("health.json"))
+          now = time.time()
+          if now - h["updated"] > 2 * 3600:
+              raise SystemExit(f"::error::scraper daemon last checked in {(now - h['updated']) / 3600:.1f}h ago")
+          ok = [s for s in h["states"].values() if s.get("last_ok") and now - s["last_ok"] < 26 * 3600]
+          if now - h["started"] > 26 * 3600 and not ok:
+              raise SystemExit("::error::no state has scraped successfully in the last day")
+          bad = sorted(k for k, s in h["states"].items() if s.get("status") == "failed")
+          print(f"ok: {len(ok)} states fresh; failing: {', '.join(bad) or 'none'}")
+          PY
