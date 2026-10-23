@@ -207,7 +207,7 @@ def rewrite(rec):
     if not m:
         raise ValueError(f"no JSON from LLM (stop_reason={r.get('stop_reason')}): {text[:200]!r}")
     out = {k: " ".join(str(v).split()) for k, v in json.loads(m.group(0)).items()}
-    if re.search(r"\bsource\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out["summary"] + out["tweet"], re.I):
+    if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out["summary"] + out["tweet"], re.I):
         raise ValueError(f"rewrite talks about its source: {out['summary'][:200]!r}")
     return {k: out[k] for k in ("headline", "tweet", "summary")}
 
