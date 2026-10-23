@@ -143,6 +143,8 @@ KEYS = {"NY": "NEW_YORK_API_KEY", "IN": "INDIANA_API_KEY", "VA": "VA_API_KEY"}  
 # shortcut: California's scraper needs the state's database dumps loaded into MySQL; add a MySQL sidecar to cover it
 UNSUPPORTED = {"CA": "California's scraper needs its database dumps loaded into MySQL first"}
 LAW = {"became-law", "executive-signature", "veto-override-passage"}
+# Sites that block automated visitors (IP blocks, Cloudflare challenges): use LegiScan's API there instead (CC BY 4.0).
+LEGISCAN_STATES = [s for s in os.environ.get("LEGISCAN_STATES", "IL,AK").split(",") if s]
 lock = threading.Lock()  # scrapers finish in parallel; serialize shared files and site builds
 
 
@@ -280,8 +282,55 @@ def set_health(st, **fields):
         return health[st]
 
 
+def legiscan_items(st):
+    """Milestones from LegiScan's bill list for a state: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed."""
+    q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], "op": "getMasterList", "state": st})
+    r = json.loads(fetch(f"https://api.legiscan.com/?{q}"))
+    if r.get("status") != "OK":
+        raise RuntimeError(f"LegiScan: {r.get('alert', r)}")
+    bills = [b for b in r["masterlist"].values() if isinstance(b, dict) and "bill_id" in b]
+    for b in bills:
+        s = int(b.get("status") or 0)
+        if s in (2, 3, 4, 5) and not re.match(r"^[HSA]C?R\d", b["number"]):  # HR, SR, HCR...: resolutions never become law
+            chamber = "upper" if b["number"].startswith("S") else "lower"
+            yield f"{st}-ls{b['bill_id']}-{s}", {**b, "state": st, "status": (s, chamber, b["status_date"]), "_date": b["status_date"]}
+
+
+def legiscan_update(b):
+    st, (status, chamber, day), num = b["state"], b["status"], b["number"]
+    desc = b.get("description") or ""
+    return {
+        "id": f"states/{st.lower()}/{b['url'].rstrip('/').rsplit('/', 1)[-1]}-{slug(num)}", "where": STATES[st], "state": st,
+        "label": re.sub(r"^([A-Z]+)(\d+)$", r"\1 \2", num), "resolution": False, "title": b["title"], "official_url": b["url"],
+        "sponsor": None, "date": day, "stage": state_stage(st, status, chamber), "milestone": True,
+        "source": b["title"] if desc in ("", b["title"]) else f"{b['title']}. {desc}",
+    }
+
+
+def legiscan_state(st):
+    """Fallback for states whose sites block automated visitors; health and alerts work the same as scrapers."""
+    prev = load(HEALTH, {}).get(st, {})
+    if not os.environ.get("LEGISCAN_API_KEY"):
+        return set_health(st, status="needs setup", error="site blocks automated visitors; needs LEGISCAN_API_KEY", last_start=time.time())
+    set_health(st, status="running", last_start=time.time())
+    try:
+        found = list(legiscan_items(st))
+        new, done, failed = process(f"states-{st.lower()}", found, legiscan_update)
+        h = set_health(st, status="ok", error="", last_end=time.time(), last_ok=time.time(), bills=len(found), source="LegiScan",
+                       milestones=new, page_failures=failed)
+        if prev.get("status") == "failed":
+            alert(f"PlainGov: {STATES[st]} recovered", f"{STATES[st]} updated from LegiScan again.")
+    except Exception as ex:
+        h = set_health(st, status="failed", error=repr(ex)[-800:], last_end=time.time())
+        if prev.get("status") != "failed":
+            alert(f"PlainGov: {STATES[st]} (LegiScan) failed", f"{ex!r}\n\nStatus page: {SITE_URL}/status/")
+    return h
+
+
 def scrape_state(st):
     """Run one state's scraper, publish its new milestones, and alert when its health changes."""
+    if st in LEGISCAN_STATES:
+        return legiscan_state(st)
     name, prev = STATES[st], load(HEALTH, {}).get(st, {})
     if st in UNSUPPORTED or (st in KEYS and not os.environ.get(KEYS[st])):
         return set_health(st, status="needs setup", error=UNSUPPORTED.get(st) or f"needs {KEYS[st]}", last_start=time.time())

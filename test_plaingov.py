@@ -1,4 +1,4 @@
-from plaingov import bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
+from plaingov import legiscan_update, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
 
 rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": "S. 4618", "resolution": False,
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
@@ -49,4 +49,8 @@ law = {**rec, "id": "a", "stage": us_stage("Public Law")}
 html = by_stage([rec, law], False)
 assert html.index("New laws") < html.index("Just proposed"), html
 assert "Having trouble" in status_body({"SC": {"status": "failed"}}) and "Coming soon" in status_body({"CA": {"status": "needs setup"}})
+ls = legiscan_update({"state": "IL", "status": (2, "upper", "2026-03-01"), "number": "SB1234", "title": "Taxes", "description": "Taxes",
+                     "url": "https://legiscan.com/IL/bill/SB1234/2025"})
+assert (ls["id"], ls["label"], ls["stage"]["short"], ls["source"]) == ("states/il/2025-sb1234", "SB 1234", "Passed the Senate", "Taxes"), ls
+assert "LegiScan" in bill_page({**rec, **ls, "headline": "h", "summary": "s", "updates": []})
 print("ok")
