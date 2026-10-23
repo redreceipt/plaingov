@@ -340,6 +340,7 @@ def scrape(only=None):
     pool, running, pulled, started = ThreadPoolExecutor(PARALLEL), {}, 0, time.time()
     for st, h in load(HEALTH, {}).items():  # scrapes cut off by a restart start over right away
         if h.get("status") == "running":
+            subprocess.run(["docker", "rm", "-f", f"plaingov-scrape-{st.lower()}"], capture_output=True)
             set_health(st, last_start=0)
     while True:
         if time.time() - pulled > 86400:
