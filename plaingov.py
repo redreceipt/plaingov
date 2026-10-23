@@ -180,9 +180,13 @@ def state_stage(st, status, chamber=None):
     }[status]
 
 
+def scraped(st):
+    return glob.glob(f"{DATA}/scrape/{st.lower()}/**/bill_*.json", recursive=True)  # scrapers write <datadir>/<state>/
+
+
 def state_items(st):
     """Milestones in a state's latest scrape. Resolutions (commemorations, positions) never become law, so skip them."""
-    for f in glob.glob(f"{DATA}/scrape/{st.lower()}/bill_*.json"):
+    for f in scraped(st):
         b = json.load(open(f))
         s = bill_stage(b) if set(b["classification"]) & {"bill", "joint resolution", "constitutional amendment"} else None
         if s:
@@ -273,7 +277,7 @@ def scrape_state(st):
         ok, log = p.returncode == 0, (p.stdout + p.stderr)[-2000:]
     except subprocess.TimeoutExpired:
         ok, log = False, "scraper still running after 22 hours"
-    files = glob.glob(f"{out}/bill_*.json")
+    files = scraped(st)
     bills = len(files)
     error = "" if ok else log
     if ok and not bills:
