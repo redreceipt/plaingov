@@ -190,7 +190,8 @@ Rules:
 - Use only facts in the source. Don't guess about effects, costs, or motives.
 - Neutral and nonpartisan. No opinions, hype words, emojis, or hashtags.
 - No jargon or legal terms (like "appropriations", "amend", "statute", "section 8-11-155", "local educational agency"). Say it the way you'd explain it to a neighbor.
-- Present tense. Start with a verb where natural ("Gives...", "Requires...").
+- Headline and summary: present tense, starting with a verb where natural ("Gives...", "Requires...").
+- Tweet: match the status. Unless it's law, say what it would do ("would", "if passed"); never imply it already happened.
 - If the source is brief, keep it brief and describe only what it says. Never mention the source or what it leaves out. Always reply with the JSON.
 
 Reply with only a JSON object with these keys:
@@ -199,12 +200,13 @@ Reply with only a JSON object with these keys:
 "summary": at most 3 short sentences on what it does and who it affects (max 350 characters)
 
 Official name: {title}
+Status: {status}
 Source: {source}"""
 
 
 def rewrite(rec):
     body = json.dumps({"model": LLM_MODEL, "max_tokens": 600, "thinking": {"type": "disabled"},
-                       "messages": [{"role": "user", "content": PROMPT.format(**rec)}]})
+                       "messages": [{"role": "user", "content": PROMPT.format(**rec, status=rec["stage"]["now"])}]})
     r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", body.encode(),
                          {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
     text = "".join(c["text"] for c in r["content"] if c["type"] == "text")
@@ -231,10 +233,10 @@ def interest(rec):
 
 
 def save(new):
-    """Merge an update into the bill's record; only re-run the rewrite when the source text changed."""
+    """Merge an update into the bill's record; only re-run the rewrite when the source or status changed."""
     path = f"{DATA}/bills/{new['id']}.json"
     rec = load(path, {"updates": []})
-    if rec.get("source") != new["source"]:
+    if (rec.get("source"), rec.get("stage")) != (new["source"], new["stage"]):
         rec.update(rewrite(new))
     rec.update(new)
     rec["interest"] = interest(rec)
