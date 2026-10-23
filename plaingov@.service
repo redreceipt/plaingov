@@ -1,0 +1,10 @@
+[Unit]
+Description=plaingov %i feed
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=exedev
+EnvironmentFile=/home/exedev/plaingov.env
+ExecStart=/usr/bin/python3 /home/exedev/plaingov/plaingov.py %i

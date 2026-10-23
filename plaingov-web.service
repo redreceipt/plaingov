@@ -1,0 +1,12 @@
+[Unit]
+Description=plaingov static site on :8000 (exe.dev proxies HTTPS to it)
+After=network.target
+
+[Service]
+User=exedev
+ExecStartPre=/usr/bin/mkdir -p /home/exedev/plaingov-data/site
+ExecStart=/usr/bin/python3 -m http.server 8000 --bind 0.0.0.0 --directory /home/exedev/plaingov-data/site
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
