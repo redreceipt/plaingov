@@ -183,7 +183,7 @@ LAW = {"became-law", "executive-signature", "veto-override-passage"}
 BILLS = {"bill", "joint resolution", "constitutional amendment"}  # resolutions (commemorations, positions) never become law
 RPM = {"UT": 20, "WI": 20}  # requests/minute for sites that rate-limit the default 60
 # Sites that block automated visitors (IP blocks, Cloudflare challenges): use LegiScan's API there instead (CC BY 4.0).
-LEGISCAN_STATES = [s for s in os.environ.get("LEGISCAN_STATES", "IL,AK").split(",") if s]
+LEGISCAN_STATES = [s for s in os.environ.get("LEGISCAN_STATES", "IL,AK,NH").split(",") if s]  # NH drops connections from our VM
 lock = threading.Lock()  # scrapers finish in parallel; serialize shared files and site builds
 
 
@@ -468,6 +468,7 @@ def scrape_state(st):
     box = f"plaingov-scrape-{st.lower()}"
     subprocess.run(["docker", "rm", "-f", box], capture_output=True)  # left over if the daemon restarted mid-scrape
     cmd = ["docker", "run", "--rm", "--name", box, "-v", f"{out}:/data",
+           "-v", f"{os.path.dirname(os.path.abspath(__file__))}/scrapers:/plaingov:ro", "-e", "PYTHONPATH=/plaingov", "-e", f"SCRAPER_USER_AGENT={UA}",
            *[a for k in KEYS.values() if os.environ.get(k) for a in ("-e", k)],
            *([CA_IMAGE] if st == "CA" else [SCRAPER_IMAGE, st.lower()]), "bills", "--scrape", "--datadir", "/data", "--rpm", str(RPM.get(st, 60))]
     try:
