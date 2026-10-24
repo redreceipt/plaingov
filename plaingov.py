@@ -544,11 +544,11 @@ STATUSES = {"passed one chamber": 2, "passed both chambers": 3, "law": 4, "vetoe
 
 
 def ask_json(prompt, max_tokens):
+    """The first JSON object in Claude's reply (it sometimes adds a note after)."""
     text, stop = claude(prompt, max_tokens)
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
+    if "{" not in text:
         raise ValueError(f"no JSON from LLM (stop_reason={stop}): {text[:200]!r}")
-    return json.loads(m.group(0))
+    return json.JSONDecoder().raw_decode(text[text.index("{"):])[0]
 
 
 def label_actions(st, bills):
