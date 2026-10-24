@@ -543,9 +543,10 @@ Reply with only a JSON object mapping each number to "maybe" or "no".
 STAGE_PROMPT = """Here is the official action history of {where} bill {identifier} ("{title}"), oldest first, as "date | chamber | action".
 How far has this bill itself gotten? Be strict: say a milestone only if an action clearly shows it.
 - Passing a chamber means that whole chamber's final vote approving this bill. Not: committee votes or reports, "reported", placed on a calendar or general order, readings, ordered to a reading, substitutions, or failed votes.
-- Law means this bill was signed, became law without a signature, got an act or chapter number, or had a veto overridden. An action saying a companion or other bill became law doesn't make this bill law. Sent or delivered to the Governor isn't law yet. A line-item or partial veto doesn't stop a signed bill from being law.
+- Law means this bill was signed, became law without a signature, got an act or chapter number, or had a veto overridden. Sent or delivered to the Governor isn't law yet. A line-item or partial veto doesn't stop a signed bill from being law.
+- Actions about a companion or substitute bill (like "Comp. became Pub. Ch. 157" or "Companion House Bill substituted"; "Comp." means companion) are about that other bill, which has its own page: they don't move this bill forward.
 - A resolution adopted by both chambers is "passed both chambers", not "law".
-- Vetoed means the Governor rejected the whole bill and it wasn't overridden.
+- Vetoed means the Governor rejected the whole bill and lawmakers didn't override it (including when an override vote failed or the veto was sustained).
 Reply with only JSON: {{"status": "none", "passed one chamber", "passed both chambers", "law", or "vetoed", "chamber": "upper" or "lower" (for "passed one chamber"), "date": "YYYY-MM-DD" of the action that got it there}}
 
 {lines}"""
