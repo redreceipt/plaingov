@@ -10,7 +10,8 @@ rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": 
 
 # Non-milestone posts carry no link; milestone posts link to our page. Both stay within 280 (links count 23, "…" 2).
 t = tweet_text(rec)
-assert "http" not in t and t.endswith("…\n\nS. 4618 · Just proposed (May 21)") and len(t) + 1 <= 280, t
+assert "http" not in t and t.endswith("…\n\nS. 4618 · Just proposed (May 21)\nFrom Sen. Jane Doe (D-NH)") and len(t) + 1 <= 280, t
+assert tweet_text({**rec, "sponsor": None}).endswith("(May 21)"), "no sponsor line without a sponsor (LegiScan)"
 assert t.startswith("U.S. Congress: word word") and "Funds counselors" not in t, t  # one block, no headline
 url = "https://plaingov.com/us/119-s-4618/"
 t = tweet_text({**rec, "milestone": True})
