@@ -476,7 +476,7 @@ def scrape_state(st):
     box = f"plaingov-scrape-{st.lower()}"
     subprocess.run(["docker", "rm", "-f", box], capture_output=True)  # left over if the daemon restarted mid-scrape
     cmd = ["docker", "run", "--rm", "--name", box, "-v", f"{out}:/data",
-           "-v", f"{os.path.dirname(os.path.abspath(__file__))}/scrapers:/plaingov:ro", "-e", "PYTHONPATH=/plaingov:./scrapers", "-e", f"USER_AGENT={UA}", "-e", "SCRAPER_TIMEOUT=180",  # ./scrapers: the images' own
+           "-v", f"{os.path.dirname(os.path.abspath(__file__))}/scrapers:/plaingov:ro", "-e", "PYTHONPATH=/plaingov:./scrapers", "-e", f"USER_AGENT={UA}",  # ./scrapers: the images' own
            *[a for k in KEYS.values() if os.environ.get(k) for a in ("-e", k)],
            *([CA_IMAGE] if st == "CA" else [SCRAPER_IMAGE, st.lower()]), "bills", "--scrape", "--datadir", "/data", "--rpm", str(RPM.get(st, 60))]
     try:
