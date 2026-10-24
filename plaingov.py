@@ -474,9 +474,18 @@ def interest(rec):
     """jev (TypeSafe's classifier, via OpenCode Zen; exe.dev's proxy adds the API key) scores 0-4."""
     body = {"model": JEV_MODEL, "questions": {"interest": INTEREST},
             "state": {"where": rec["where"], "status": rec["stage"]["short"], "headline": rec["headline"], "summary": rec["summary"]}}
-    r = json.loads(fetch("https://opencode.int.exe.xyz/inference/v1/systemone", json.dumps(body).encode(),
-                         {"content-type": "application/json"}))
-    return round(r["answers"]["interest"]["score"], 2)
+    try:
+        r = json.loads(fetch("https://opencode.int.exe.xyz/inference/v1/systemone", json.dumps(body).encode(),
+                             {"content-type": "application/json"}))
+        return round(r["answers"]["interest"]["score"], 2)
+    except urllib.error.HTTPError as ex:  # jev's free tier has a daily limit; Claude keeps posting going until it resets
+        if ex.code not in (402, 429):
+            raise
+    prompt = (f"{INTEREST['instructions']} Score 0-4: " + "; ".join(f"{i}={c}" for i, c in enumerate(INTEREST["criteria"]))
+              + f". Reply with only the number.\n\n{json.dumps(body['state'])}")
+    r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", json.dumps({"model": LLM_MODEL, "max_tokens": 10, "thinking": {"type": "disabled"},
+                         "messages": [{"role": "user", "content": prompt}]}).encode(), {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
+    return min(4.0, max(0.0, float(re.search(r"\d+(\.\d+)?", r["content"][0]["text"]).group(0))))
 
 
 def score(rec):
