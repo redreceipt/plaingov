@@ -16,6 +16,8 @@ assert t.startswith("U.S. Congress: word word") and "Funds counselors" not in t,
 url = "https://plaingov.com/us/119-s-4618/"
 t = tweet_text({**rec, "milestone": True})
 assert t.endswith("\n" + url) and len(t) - len(url) + 23 + 1 <= 280, t
+t = tweet_text({**rec, "milestone": True}, link=False, question=True)  # #12 and #14 experiments
+assert "http" not in t and "… Would this affect you?\n\nS. 4618" in t and len(t) + 1 <= 280, t
 
 # Pages escape model output and link back to their list page.
 p = bill_page(rec)
@@ -139,8 +141,8 @@ p = bill_page({**rec, "details": ["Under 21 days old."], "changes": "Adds drop b
 assert all(x in p for x in ("<h2>What it does</h2><ul><li>Under 21 days old.", "What changes", "September 10, 2026", "only have this bill's official title",
                             "The Governor signed it on September 9, 2026.", "<li>2026-09-09: SIGNED INTO LAW</li>")), p
 # The weekly X report totals metrics and compares groups (e.g. link vs no link) by median.
-rows = [{"id": "1", "bill": "us/a", "stage": "It's law", "where": "federal", "link": True, "hours_et": "06-12", "impression_count": 100, "like_count": 3},
-        {"id": "2", "bill": "states/x", "stage": "Passed the Senate", "where": "state", "link": False, "hours_et": "18-24", "impression_count": 40}]
+rows = [{"id": "1", "bill": "us/a", "stage": "It's law", "where": "federal", "link": True, "question": False, "hours_et": "06-12", "impression_count": 100, "like_count": 3},
+        {"id": "2", "bill": "states/x", "stage": "Passed the Senate", "where": "state", "link": False, "question": True, "hours_et": "18-24", "impression_count": 40}]
 t = report_text(rows)
 assert "2 posts. Totals: impression 140, like 3" in t and "link True (1): 100 / 3 / 0 / 0" in t and t.index("status/1") < t.index("status/2"), t
 assert report_text([]) == "No posts in the last 7 days."

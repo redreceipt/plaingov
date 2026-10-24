@@ -1040,19 +1040,24 @@ def serve():
 
 # --- X ----------------------------------------------------------------------
 
-def tweet_text(r):
+QUESTION = "Would this affect you?"
+EXPERIMENTS_UNTIL = "2026-11-08"  # #12 links and #14 questions alternate until then; compare in the weekly report, then decide
+
+
+def tweet_text(r, link=True, question=False):
     """One block (what changes, for whom), then bill, status, date, and sponsor. The site keeps its headline + summary.
     Sponsors are named, never @mentioned: X bans automated mentions of people who haven't opted in (docs/x-engagement.md).
-    Milestones (passed a chamber or further) link to the bill page; X charges much more for posts with links."""
+    Milestones (passed a chamber or further) link to the bill page unless `link` is off; X charges much more for posts with links."""
     head = f"{r['where']}: "
+    ask = f" {QUESTION}" if question else ""
     tail = f"{r['label']} · {r['stage']['short']} ({date(r['date'], '%b %-d' if r['date'][:4] == time.strftime('%Y') else '%b %-d, %Y')})"
     tail += f"\nFrom {r['sponsor']}" if r.get("sponsor") else ""
-    url = f"{SITE_URL}/{r['id']}/" if r["milestone"] else ""
-    room = 280 - len(head) - len(tail) - 2 - (URL_LEN + 1 if url else 0)  # 2 = blank-line separator
+    url = f"{SITE_URL}/{r['id']}/" if r["milestone"] and link else ""
+    room = 280 - len(head) - len(ask) - len(tail) - 2 - (URL_LEN + 1 if url else 0)  # 2 = blank-line separator
     body = r["tweet"]
     if len(body) > room:  # "…" weighs 2 on X, hence room - 2
         body = body[: room - 2].rsplit(" ", 1)[0].rstrip(",;:") + "…"
-    return f"{head}{body}\n\n{tail}" + (f"\n{url}" if url else "")
+    return f"{head}{body}{ask}\n\n{tail}" + (f"\n{url}" if url else "")
 
 
 def x_api(method, url, params={}, body=None):
@@ -1083,7 +1088,7 @@ def report_text(rows):
         return "No posts in the last 7 days."
     out = [f"{len(rows)} posts. Totals: " + ", ".join(f"{m.removesuffix('_count')} {sum(r.get(m, 0) for r in rows)}" for m in METRICS), "",
            "Median impressions / likes / replies / profile clicks per post:"]
-    for group in ("stage", "where", "link", "hours_et"):
+    for group in ("stage", "where", "link", "question", "hours_et"):
         for value in sorted({str(r[group]) for r in rows}):
             rs = [r for r in rows if str(r[group]) == value]
             med = lambda m: statistics.median(r.get(m, 0) for r in rs)
@@ -1109,7 +1114,7 @@ def report():
         hour = datetime.datetime.fromisoformat(t["created_at"].replace("Z", "+00:00")).astimezone(zoneinfo.ZoneInfo("America/New_York")).hour
         rows.append({"id": t["id"], "bill": bills.get(t["id"], "not ours"), "stage": rec["stage"].get("short", "?"),
                      "where": "state" if rec.get("state") else "federal", "link": "t.co/" in t["text"],
-                     "hours_et": f"{hour // 6 * 6:02d}-{hour // 6 * 6 + 6:02d}", **t.get("public_metrics", {}), **t.get("non_public_metrics", {})})
+                     "question": QUESTION in t["text"], "hours_et": f"{hour // 6 * 6:02d}-{hour // 6 * 6 + 6:02d}", **t.get("public_metrics", {}), **t.get("non_public_metrics", {})})
     day = time.strftime("%Y-%m-%d")
     write(f"{DATA}/state/reports/{day}.json", json.dumps(rows, indent=1))
     text = report_text(rows)
@@ -1157,7 +1162,8 @@ def post_best():
         why = "waiting to spread posts out"
     else:
         rec = load(f"{DATA}/bills/{best['id']}.json", None)
-        text = tweet_text(rec)
+        n, testing = len(log), time.strftime("%Y-%m-%d") < EXPERIMENTS_UNTIL  # independent alternations, so each compares cleanly
+        text = tweet_text(rec, link=not testing or n % 2 == 0, question=testing and n // 2 % 2 == 0)
         tid = "dry-run" if DRY_RUN else post_x(text)["data"]["id"]
         print(f"--- {'DRY RUN ' if DRY_RUN else ''}post {best['id']} (interest {best['interest']})\n{text}", flush=True)
         log.append({"at": now, "id": best["id"], "tweet": tid})
