@@ -555,7 +555,7 @@ Rules:
 - Keep legal conditions and exceptions intact: if protection only applies when conditions are met, say so instead of rounding it to "no penalty".
 - Say what's new versus what already existed when the source shows it. "[added: ...]" and "[removed: ...]" mark changed text, and "is amended to read" means existing law is being changed. Don't call something new if the bill only adjusts an existing rule.
 - Neutral and nonpartisan. No opinions, hype, slang, emojis, or hashtags.
-- Everyday words and short sentences, about an 8th-grade reading level. Explain any legal or technical term in a few plain words.
+- Everyday words and short sentences, about an 8th-grade reading level. Explain any legal or technical term in a few plain words, and don't cite statute numbers (like "AS 11.81.500" or "section 8-11-155").
 - Action dates are when each action was recorded. If an action's text gives the real date (like "SIGNED INTO LAW 9/9"), use that one.
 - Match the status. If it's law, say what it does ("Hospitals now have to...") or when it starts if that's later ("Starting July 1, 2027, ..."). If it isn't law yet, say what it would do ("would", "if it passes").
 - If the source is only a title or a short description, say only what that tells you, keep it short, and set "limited" to true. Don't fill space.
