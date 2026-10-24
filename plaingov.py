@@ -5,6 +5,7 @@ Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post qu
        plaingov.py scrape     daemon: run each state legislature's scraper about daily -> pages + post queue + alerts
        plaingov.py post       post the most interesting queued update to X (@plaingov)
        plaingov.py site       rebuild the site only
+       plaingov.py refresh    rewrite existing pages from before the current prompt (PROMPT_VERSION)
 
 A feed's first run builds pages for what's already listed (states: last BACKFILL_DAYS) and queues no posts.
 DRY_RUN=1 (default) prints posts instead of sending them.
@@ -25,7 +26,7 @@ SCRAPER_IMAGE = os.environ.get("SCRAPER_IMAGE", "openstates/scrapers:latest")
 PARALLEL = int(os.environ.get("PARALLEL", "12"))  # scrapers are network-bound (~85 MB, ~1% CPU each)
 RESCRAPE_HOURS = float(os.environ.get("RESCRAPE_HOURS", "20"))
 ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "micneeley14@gmail.com")  # exe.dev only emails the VM owner
-UA = "plaingov-bot/1.0 (+https://github.com/redreceipt/plaingov)"
+UA = "PlainGov/1.0 (+https://plaingov.com/about/)"  # some legislatures (PA, MI) reject user agents containing "bot"
 URL_LEN = 23  # X counts every link as 23 chars
 
 
@@ -36,7 +37,25 @@ def fetch(url, data=None, headers={}):
 
 
 def strip(s):
-    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", s)).split())
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", re.sub(r"(?s)<(script|style)\b.*?</\1>", " ", s))).split())
+
+
+def doc_text(url):
+    """A bill version's text. PDFs go through pdftotext (poppler-utils); in HTML, changed text is marked
+    [added: ...] / [removed: ...] so the rewrite can tell what's new."""
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=120) as r:
+        return doc_bytes_text(r.read(), r.headers.get_content_charset())
+
+
+def doc_bytes_text(data, charset=None):
+    if data[:5] == b"%PDF-":
+        return " ".join(subprocess.run(["pdftotext", "-", "-"], input=data, capture_output=True, timeout=120, check=True).stdout.decode("utf-8", "replace").split())
+    mark = lambda tag: lambda m: f" [{tag}: {m[2]}] " if strip(m[2]) else " "
+    t = re.sub(r"(?s)<(s|strike|del)\b[^>]*>(.*?)</\1>", mark("removed"), data.decode(charset or "utf-8", "replace"), flags=re.I)
+    return strip(re.sub(r"(?s)<(u|ins)\b[^>]*>(.*?)</\1>", mark("added"), t, flags=re.I))
+
+
+SOURCE_CHARS = 40000  # shortcut: longer bills (budgets) get explained from their first ~10k words
 
 
 def load(path, default):
@@ -116,13 +135,22 @@ def congress_update(s):
     st = us_stage(s["actionDesc"])
     if t in RESOLUTIONS and st["step"] > 0:
         st["next"] = ""
-    sponsors = api(f"bill/{b['congress']}/{t.lower()}/{b['number']}")["bill"].get("sponsors") or [{}]
+    path = f"bill/{b['congress']}/{t.lower()}/{b['number']}"
+    info = api(path)["bill"]
+    sponsors, last = info.get("sponsors") or [{}], info.get("latestAction") or {}
+    text = ""
+    try:  # the bill's own text, besides CRS's summary
+        url = next((f["url"] for v in api(f"{path}/text").get("textVersions", []) for f in v["formats"] if f["type"] == "Formatted Text"), None)
+        text = doc_text(url) if url else ""
+    except Exception as ex:
+        print(f"no text for {path}: {ex!r}", file=sys.stderr, flush=True)
     return {
         "id": f"us/{b['congress']}-{t.lower()}-{b['number']}", "where": "U.S. Congress", "state": None,
         "label": f"{label} {b['number']}", "resolution": t in RESOLUTIONS, "title": b["title"],
         "official_url": f"https://www.congress.gov/bill/{ordinal(b['congress'])}-congress/{slug}/{b['number']}",
         "sponsor": sponsor_name(sponsors[0].get("fullName")), "date": s["actionDate"], "stage": st,
-        "milestone": st["step"] >= 1, "source": strip(s["text"]),
+        "milestone": st["step"] >= 1, "source": " ".join(x for x in (strip(s["text"]), text) if x)[:SOURCE_CHARS],
+        "actions": [f"{s['actionDate']}: {s['actionDesc']}"] + ([f"{last['actionDate']}: {last['text']}"] if last.get("text") else []),
     }
 
 
@@ -213,15 +241,25 @@ def state_items(st, ai={}):
 
 
 def bill_text(b):
-    """Newest HTML version of the bill, struck-out text removed, for richer rewrites."""
+    """Text of the newest version we can read (HTML first, then PDF), for richer rewrites."""
     for v in sorted(b["versions"], key=lambda v: v.get("date") or "", reverse=True):
-        for link in v["links"]:
-            if link.get("media_type") == "text/html":
+        for link in sorted(v["links"], key=lambda l: l.get("media_type") != "text/html"):
+            if link.get("media_type") in ("text/html", "application/pdf"):
                 try:
-                    return strip(re.sub(r"<(s|strike|del)\b.*?</\1>", " ", fetch(link["url"]), flags=re.S | re.I))
-                except Exception:
-                    return ""
+                    if len(text := doc_text(link["url"])) > 200:
+                        return text
+                except Exception as ex:
+                    print(f"bill text {link['url']}: {ex!r}", file=sys.stderr, flush=True)
     return ""
+
+
+def last_actions(acts):
+    """The latest few official actions, oldest first, as 'YYYY-MM-DD: what happened'."""
+    return [f"{a['date'][:10]}: {a['description']}" for a in sorted(acts, key=lambda a: a["date"])[-6:]]
+
+
+def state_id(b):
+    return f"states/{b['state'].lower()}/{slug(b['legislative_session'])}-{slug(b['identifier'])}"
 
 
 def state_update(b):
@@ -233,10 +271,9 @@ def state_update(b):
         more = len(people) - 1
         sponsor = title + people[0]["name"] + (f" and {more} other{'s' if more > 1 else ''}" if more else "")
     abstract = " ".join(a["abstract"] for a in b["abstracts"])
-    # shortcut: first 12k chars only; huge bills (budgets) get summarized from their opening sections
-    source = " ".join(x for x in (b["title"], abstract, bill_text(b)) if x)[:12000]
+    source = " ".join(x for x in (b["title"], abstract, bill_text(b)) if x)[:SOURCE_CHARS]
     return {
-        "id": f"states/{st.lower()}/{slug(b['legislative_session'])}-{slug(b['identifier'])}", "where": STATES[st], "state": st,
+        "id": state_id(b), "where": STATES[st], "state": st, "actions": last_actions(b.get("actions", [])),
         "label": b["identifier"], "resolution": False, "title": b["title"], "official_url": (b["sources"] or [{"url": ""}])[0]["url"],
         "sponsor": sponsor, "date": day, "stage": state_stage(st, status, chamber), "milestone": True, "source": source,
     }
@@ -337,15 +374,38 @@ def legiscan_items(st, known=None):
                 yield f"{st}-{k[0]}-{k[1]}-{s}", {**item, "_session": k[0], "number": k[1]}
 
 
+def legiscan_id(b):
+    return f"states/{b['state'].lower()}/{slug(b.get('_session') or b['url'].rstrip('/').rsplit('/', 1)[-1])}-{slug(b['number'])}"
+
+
 def legiscan_update(b):
-    """No sponsor in LegiScan's bill list; leaving it out keeps the one a scraper found."""
+    """No sponsor in LegiScan's bill list; leaving it out keeps the one a scraper found. getBill (one query) adds the
+    official history and the newest text, read from the legislature's own copy."""
     st, (status, chamber, day), num = b["state"], b["status"], b["number"]
     desc = b.get("description") or ""
+    actions, text = [f"{b['last_action_date']}: {b['last_action']}"] if b.get("last_action") else [], ""
+    if b.get("bill_id"):
+        q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], "op": "getBill", "id": b["bill_id"]})
+        bill = json.loads(fetch(f"https://api.legiscan.com/?{q}")).get("bill", {})
+        actions = [f"{h['date']}: {h['action']}" for h in bill.get("history", [])[-6:]] or actions
+        for t in reversed(bill.get("texts", [])):
+            try:
+                if len(text := doc_text(t["state_link"])) > 200:
+                    break
+            except Exception as ex:  # e.g. a legislature's broken certificate chain: use LegiScan's copy (one more query)
+                print(f"bill text {t.get('state_link')}: {ex!r}", file=sys.stderr, flush=True)
+                try:
+                    q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], "op": "getBillText", "id": t["doc_id"]})
+                    if len(text := doc_bytes_text(base64.b64decode(json.loads(fetch(f"https://api.legiscan.com/?{q}"))["text"]["doc"]))) > 200:
+                        break
+                except Exception as ex2:
+                    print(f"LegiScan text {t.get('doc_id')}: {ex2!r}", file=sys.stderr, flush=True)
+            text = ""
     return {
-        "id": f"states/{st.lower()}/{slug(b.get('_session') or b['url'].rstrip('/').rsplit('/', 1)[-1])}-{slug(num)}", "where": STATES[st],
+        "id": legiscan_id(b), "where": STATES[st], "actions": actions,
         "state": st, "label": re.sub(r"^([A-Z]+)(\d+)$", r"\1 \2", num), "resolution": False, "title": b["title"], "official_url": b["url"],
         "date": day, "stage": state_stage(st, status, chamber), "milestone": True,
-        "source": b["title"] if desc in ("", b["title"]) else f"{b['title']}. {desc}",
+        "source": " ".join(x for x in (b["title"], "" if desc == b["title"] else desc, text) if x)[:SOURCE_CHARS],
     }
 
 
@@ -486,26 +546,46 @@ def scrape(only=None):
 
 # --- AI: plain-English rewrite (Claude) and interest score (jev) ----------------
 
-PROMPT_VERSION = 4  # bump to rewrite every page with a changed prompt (python3 plaingov.py rebuild)
-PROMPT = """You write for PlainGov, which explains government to regular people who don't follow politics.
-Explain this {where} bill the way you'd text a smart friend: casual, warm, and dead simple.
+PROMPT_VERSION = 5  # bump to rewrite every page with a changed prompt (python3 plaingov.py refresh)
+PROMPT = """You write for PlainGov, which explains government to regular people who don't follow politics. After reading your page, someone should know exactly what this {where} bill does, what it changes, and what just happened to it.
 
 Rules:
-- Use only facts in the source. Don't guess about effects, costs, or motives.
-- Neutral and nonpartisan. No opinions, no hype, no slang, no emojis or hashtags.
-- Everyday words and short sentences, about a 6th-grade reading level. Say "you" when it affects the reader.
-- Zero jargon or legal terms (like "appropriations", "amend", "statute", "provisions", "section 8-11-155", "local educational agency"). If you must use a government word, explain it in a few words.
-- Match the status in the headline, tweet, and summary. If it's law, say what it does now ("Hospitals now have to..."). If it isn't law yet, say what it would do ("would", "if it passes"); never imply it already happened.
-- If the source is brief, keep it brief and describe only what it says. Never mention the source or what it leaves out. Always reply with the JSON.
+- Use only facts in the source and official actions. Don't guess about effects, costs, or motives, and never invent details.
+- Be concrete everywhere, headline included: name the actual people, places, amounts, ages, deadlines, and limits the source gives. Never write placeholders like "certain places" or "a safety device" when the source says what they are. Don't pad with definitions of general terms (don't explain what an effective date is: give the date).
+- Keep legal conditions and exceptions intact: if protection only applies when conditions are met, say so instead of rounding it to "no penalty".
+- Say what's new versus what already existed when the source shows it. "[added: ...]" and "[removed: ...]" mark changed text, and "is amended to read" means existing law is being changed. Don't call something new if the bill only adjusts an existing rule.
+- Neutral and nonpartisan. No opinions, hype, slang, emojis, or hashtags.
+- Everyday words and short sentences, about an 8th-grade reading level. Explain any legal or technical term in a few plain words, and don't cite statute numbers (like "AS 11.81.500" or "section 8-11-155").
+- Action dates are when each action was recorded. If an action's text gives the real date (like "SIGNED INTO LAW 9/9"), use that one.
+- Match the status. If it's law, say what it does ("Hospitals now have to...") or when it starts if that's later ("Starting July 1, 2027, ..."). If it isn't law yet, say what it would do ("would", "if it passes").
+- If the source is only a title or a short description, say only what that tells you, keep it short, and set "limited" to true. Don't fill space.
 
 Reply with only a JSON object with these keys:
 "headline": what changes for people, in 4-10 everyday words, sentence case, no period (max 70 characters). Like "Hospitals would have to give you an itemized bill"
 "tweet": one sentence that makes someone stop scrolling, leading with who it affects or what changes for them, in concrete terms (max 140 characters)
-"summary": 2-3 short, friendly sentences on what it does and who it affects (max 320 characters)
+"summary": 2-3 short sentences: the main thing it does and who it affects (max 350 characters)
+"details": a list of 2-6 short sentences with the specifics: who it covers, what's required or allowed, limits, exceptions, money, deadlines ([] if the source doesn't say)
+"changes": 1-2 sentences on what's different from current law ("" if the source doesn't show it)
+"effective": when it takes effect, like "September 10, 2026" or "90 days after it becomes law"; prefer a date in the official actions over one in the text ("" if neither says)
+"happened": one sentence on the latest official action and its date, in plain words, like "The Governor signed it on September 9, 2026."
+"limited": true if the source is only a title or short description, else false
 
 Official name: {title}
 Status: {status}
+Latest official actions:
+{actions}
 Source: {source}"""
+
+CHECK_PROMPT = """Check this plain-English explanation of a bill against its official source and actions. Reply with only JSON: {{"vague": true or false, "unsupported": ["..."]}}
+- vague: true only if it stays at the level of the topic (names the subject, or uses placeholders like "certain places" or "a safety device") when the source says what the bill actually requires, allows, or covers. Leaving out some details is fine.
+- unsupported: each claim that the source or actions don't support, including overstated legal effects. Plain rewording is fine. [] if none.
+
+Official actions:
+{actions}
+Source: {source}
+
+Explanation: {rewrite}"""
+REWRITE_KEYS = ("headline", "tweet", "summary", "details", "changes", "effective", "happened", "limited")
 
 
 def llm(prompt, max_tokens, model=LLM_MODEL):
@@ -520,12 +600,31 @@ def llm(prompt, max_tokens, model=LLM_MODEL):
 
 
 def rewrite(rec):
-    out = {k: " ".join(str(v).split()) for k, v in ask_json(PROMPT.format(**rec, status=rec["stage"]["now"] + (
-        " This IS law now: use present tense everywhere and never say 'would'." if rec["stage"]["step"] == 3
-        else " This is NOT law yet: say what it would do.")), 600).items()}
-    if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out["summary"] + out["tweet"], re.I):
-        raise ValueError(f"rewrite talks about its source: {out['summary'][:200]!r}")
-    return {k: out[k] for k in ("headline", "tweet", "summary")}
+    """Claude writes the page and STAGE_MODEL checks it against the source. Claude gets one retry with that feedback, then
+    STAGE_MODEL (more precise, less plain) a last one. A rewrite that still fails raises, so the bill is tried again next
+    run instead of publishing something vague or wrong."""
+    actions = "\n".join(rec.get("actions") or [f"{rec['date']}: {rec['stage']['now']}"])
+    prompt = PROMPT.format(**{**rec, "actions": actions, "status": rec["stage"]["now"] + (
+        " This IS law now: use present tense, or say when it starts if that's later." if rec["stage"]["step"] == 3
+        else " This is NOT law yet: say what it would do.")})
+    for model in (LLM_MODEL, LLM_MODEL, STAGE_MODEL):
+        out = ask_json(prompt, 6000, model)
+        out = {k: [" ".join(str(x).split()) for x in (v if isinstance(v, list) else [v] if v else [])] if k == "details"
+               else bool(v) if k == "limited" else " ".join(str(v).split()) for k, v in out.items() if k in REWRITE_KEYS}
+        problems = []
+        if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out.get("summary", "") + out.get("tweet", ""), re.I):
+            problems.append("It talks about the source instead of the bill.")
+        if not all(out.get(k) for k in ("headline", "tweet", "summary")):
+            problems.append("headline, tweet, and summary are required.")
+        if not problems:
+            check = ask_json(CHECK_PROMPT.format(actions=actions, source=rec["source"], rewrite=json.dumps(out)), 6000, STAGE_MODEL)
+            problems = [f"Unsupported: {c}" for c in check.get("unsupported") or []]
+            if check.get("vague") and not out.get("limited"):
+                problems.append("Too vague: say what the bill actually requires, allows, or covers, using the source's specifics.")
+        if not problems:
+            return {k: out.get(k, [] if k == "details" else "") for k in REWRITE_KEYS}
+        prompt += "\n\nYour last answer had these problems. Fix them and reply with the full JSON again:\n- " + "\n- ".join(problems)
+    raise ValueError(f"rewrite failed checks three times: {problems}")
 
 
 STAGE_PROMPT = """Here is the official action history of {where} bill {identifier} ("{title}"), oldest first, as "date | chamber | action".
@@ -760,6 +859,17 @@ def bill_page(r):
             f"<li{' class=done' if i <= st['step'] else ''}{' aria-current=step' if i == st['step'] else ''}>{s}</li>"
             for i, s in enumerate(STEPS)) + "</ol>"
     nxt = f"<p><strong>What's next:</strong> {e(st['next'])}</p>" if st["next"] else ""
+    explain = ""
+    if r.get("details"):
+        explain += "<h2>What it does</h2><ul>" + "".join(f"<li>{e(d)}</li>" for d in r["details"]) + "</ul>"
+    if r.get("changes"):
+        explain += f"<h2>What changes</h2><p>{e(r['changes'])}</p>"
+    if r.get("effective"):
+        explain += f"<h2>When it takes effect</h2><p>{e(r['effective'])}</p>"
+    if r.get("limited"):
+        explain += "<p class=meta>So far we only have this bill's official title and description, so there isn't more to explain yet. The full bill is linked below.</p>"
+    record = "".join(f"<li>{e(a)}</li>" for a in reversed(r.get("actions") or []))
+    record = f"<p class=meta>From the official record:</p><ul class=meta>{record}</ul>" if record else ""
     sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}</dd>" if r.get("sponsor") else ""
     history = ""
     if len(r["updates"]) > 1:
@@ -771,8 +881,9 @@ def bill_page(r):
     body = f"""<p class=eyebrow><a href="{home}">{e(r['where'])}</a> · {e(r['label'])}</p>
 <h1>{e(r['headline'])}</h1>
 <p class=lede>{e(r['summary'])}</p>
+{explain}
 <h2>Where it's at</h2>
-<div class=box>{track}<p><strong>What just happened:</strong> {e(st['now'])} <span class=meta>{date(r['date'])}</span></p>{nxt}</div>
+<div class=box>{track}<p><strong>What just happened:</strong> {e(r['happened']) if r.get('happened') else f"{e(st['now'])} <span class=meta>{date(r['date'])}</span>"}</p>{nxt}{record}</div>
 <h2>The basics</h2>
 <dl><dt>Bill number</dt><dd>{e(r['label'])}</dd><dt>Official name</dt><dd>{e(r['title'])}</dd>{sponsor}</dl>
 {history}
@@ -868,16 +979,35 @@ def status_body(health):
             f"<table><thead><tr><th>State</th><th>Status</th><th>Last good check</th><th>Bills we're tracking</th></tr></thead><tbody>{rows}</tbody></table>")
 
 
-def rebuild():
-    """Rewrite every page from scratch after a prompt or copy change: Congress refetched, states from their last scrape on disk."""
-    shutil.rmtree(f"{DATA}/bills", ignore_errors=True)
-    for f in glob.glob(f"{DATA}/state/congress.json") + glob.glob(f"{DATA}/state/states-*.json"):
-        os.remove(f)
-    process("congress", congress_items(BACKFILL_DAYS), congress_update)
-    health = load(HEALTH, {})
+def refresh():
+    """Rewrite existing pages from before PROMPT_VERSION with fresh sources (bill text, official actions). Queues no posts."""
+    stale = lambda id: (load(f"{DATA}/bills/{id}.json", None) or {"v": PROMPT_VERSION}).get("v") != PROMPT_VERSION
+    jobs = []
     for st in STATES:
-        if health.get(st, {}).get("status") == "ok" and scraped(st):
-            process(f"states-{st.lower()}", state_items(st, ai_stages(st)), state_update)
+        if st in LEGISCAN_STATES or (st in KEYS and not os.environ.get(KEYS[st])):
+            jobs += [(legiscan_update, v) for _, v in legiscan_items(st) if stale(legiscan_id(v))] if os.environ.get("LEGISCAN_API_KEY") else []
+        elif scraped(st):
+            jobs += [(state_update, v) for _, v in state_items(st, ai_stages(st)) if stale(state_id(v))]
+    for f in glob.glob(f"{DATA}/bills/us/*.json"):
+        rec = json.load(open(f))
+        if rec.get("v") != PROMPT_VERSION:
+            c, t, n = re.match(r"us/(\d+)-([a-z]+)-(\d+)$", rec["id"]).groups()
+            latest = max(api(f"bill/{c}/{t}/{n}/summaries").get("summaries") or [{}], key=lambda x: x.get("updateDate", ""))
+            if latest:
+                jobs.append((congress_update, {**latest, "bill": {"congress": int(c), "type": t.upper(), "number": n, "title": rec["title"]}}))
+
+    def one(job):
+        try:
+            return save(job[0](job[1]))
+        except Exception as ex:  # left as is; the next refresh tries again
+            print(f"FAILED refresh: {ex!r}"[:300], file=sys.stderr, flush=True)
+
+    with ThreadPoolExecutor(6) as pool:
+        done = sum(bool(r) for r in pool.map(one, jobs))
+    with lock:
+        build_site()
+    left = sum(json.load(open(f)).get("v") != PROMPT_VERSION for f in glob.glob(f"{DATA}/bills/**/*.json", recursive=True))
+    print(f"refresh: {done} of {len(jobs)} pages rewritten; {left} still on an older prompt (no current source, or failed)")
 
 
 def serve():
@@ -1021,4 +1151,4 @@ if __name__ == "__main__":
     cmd, arg = sys.argv[1], (sys.argv[2:] or [None])[0]
     if cmd == "congress":
         sys.exit(1 if process("congress", congress_items(), congress_update)[2] else 0)
-    {"site": build_site, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "rebuild": rebuild}[cmd]()
+    {"site": build_site, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh}[cmd]()
