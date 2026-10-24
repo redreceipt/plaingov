@@ -1130,8 +1130,15 @@ def post():
             print(f"X report failed: {ex!r}", file=sys.stderr, flush=True)
 
 
+POST_HOURS = (8, 21)  # Eastern; a new post's first 2 hours decide its reach, so don't spend them while the U.S. sleeps
+
+
+def posting_hours(t):
+    return POST_HOURS[0] <= datetime.datetime.fromtimestamp(t, zoneinfo.ZoneInfo("America/New_York")).hour < POST_HOURS[1]
+
+
 def post_best():
-    """Post the most interesting update from the last day, spacing posts evenly under MAX_POSTS_PER_DAY."""
+    """Post the most interesting update from the last day during POST_HOURS, spacing MAX_POSTS_PER_DAY evenly across them."""
     qpath, lpath = f"{DATA}/state/queue.json", f"{DATA}/state/posts.json"
     now = time.time()
     queue = [q for q in load(qpath, []) if now - q["at"] < 86400]  # day-old news isn't news
@@ -1141,9 +1148,12 @@ def post_best():
         if q["interest"] is None:
             q["interest"] = score(load(f"{DATA}/bills/{q['id']}.json", None) or {})
     best = max((q for q in queue if q["interest"] is not None), key=lambda q: q["interest"], default=None)
+    gap = (POST_HOURS[1] - POST_HOURS[0]) * 3600 / MAX_POSTS_PER_DAY
     if not best or best["interest"] < MIN_INTEREST:
         why = "nothing interesting enough"
-    elif len(recent) >= MAX_POSTS_PER_DAY or (recent and now - recent[-1]["at"] < 86400 / MAX_POSTS_PER_DAY - 300):
+    elif not posting_hours(now):
+        why = f"outside posting hours ({POST_HOURS[0]}:00-{POST_HOURS[1]}:00 Eastern)"
+    elif len(recent) >= MAX_POSTS_PER_DAY or (recent and now - recent[-1]["at"] < gap - 300):
         why = "waiting to spread posts out"
     else:
         rec = load(f"{DATA}/bills/{best['id']}.json", None)
