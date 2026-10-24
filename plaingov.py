@@ -143,6 +143,7 @@ KEYS = {"NY": "NEW_YORK_API_KEY", "IN": "INDIANA_API_KEY", "VA": "VA_API_KEY"}  
 # California's image bundles MySQL, loads the state's database dumps, then scrapes; its entrypoint supplies "ca".
 CA_IMAGE = os.environ.get("CA_SCRAPER_IMAGE", "openstates/scrapers-california:latest")
 LAW = {"became-law", "executive-signature", "veto-override-passage"}
+BILLS = {"bill", "joint resolution", "constitutional amendment"}  # resolutions (commemorations, positions) never become law
 RPM = {"UT": 20, "WI": 20}  # requests/minute for sites that rate-limit the default 60
 # Sites that block automated visitors (IP blocks, Cloudflare challenges): use LegiScan's API there instead (CC BY 4.0).
 LEGISCAN_STATES = [s for s in os.environ.get("LEGISCAN_STATES", "IL,AK").split(",") if s]
@@ -194,10 +195,10 @@ def scraped(st):
 
 
 def state_items(st):
-    """Milestones in a state's latest scrape. Resolutions (commemorations, positions) never become law, so skip them."""
+    """Milestones in a state's latest scrape."""
     for f in scraped(st):
         b = json.load(open(f))
-        s = bill_stage(b) if set(b["classification"]) & {"bill", "joint resolution", "constitutional amendment"} else None
+        s = bill_stage(b) if set(b["classification"]) & BILLS else None
         if s:
             yield f"{st}-{b['legislative_session']}-{b['identifier']}-{s[0]}", {**b, "state": st, "status": s, "_date": s[2]}
 
@@ -283,27 +284,58 @@ def set_health(st, **fields):
         return health[st]
 
 
-def legiscan_items(st):
-    """Milestones from LegiScan's bill list for a state: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed."""
+def bill_num(n):
+    """'HB 0012' -> 'HB12', so LegiScan and scraper bill numbers match."""
+    return re.sub(r"^([A-Z]+)0*(?=\d)", r"\1", re.sub(r"[^A-Z0-9]", "", n.upper()))
+
+
+def save_ids(st):
+    """Bill number -> [session, identifier, status] from a good scrape's main session, for a LegiScan backup later."""
+    rows = []
+    for f in scraped(st):
+        b = json.load(open(f))
+        if set(b["classification"]) & BILLS:
+            s = bill_stage(b)
+            rows.append((b["legislative_session"], b["identifier"], s[0] if s else 0, max((a["date"][:4] for a in b["actions"]), default="0")))
+    # shortcut: only the session with the most bills; special-session bills (numbers can repeat) aren't backed up
+    sessions = [r[0] for r in rows]
+    main = max(set(sessions), key=sessions.count, default=None)
+    write(f"{DATA}/state/ids-{st.lower()}.json", json.dumps({"at": time.strftime("%Y-%m-%d", time.gmtime()), "year": int(max((r[3] for r in rows if r[0] == main), default=0)),
+          "bills": {bill_num(i): [s, i, n] for s, i, n, _ in rows if s == main}}))
+
+
+def legiscan_items(st, known=None):
+    """Milestones from LegiScan's bill list for a state: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed.
+    As a backup for a broken scraper, `known` (save_ids) maps them onto the scraper's bill IDs and post keys, so a bill
+    never gets two pages or posts. Only milestones since that scrape count (scrapers can miss old ones, e.g. SC's "Act No.":
+    that's not news); bills the scraper didn't know, or already had at that stage, are skipped."""
     q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], "op": "getMasterList", "state": st})
     r = json.loads(fetch(f"https://api.legiscan.com/?{q}"))
     if r.get("status") != "OK":
         raise RuntimeError(f"LegiScan: {r.get('alert', r)}")
+    session = r["masterlist"].get("session", {})
+    if known and (session.get("special") or session.get("year_start", 0) > known["year"]):  # bill numbers restart each session
+        raise RuntimeError(f"LegiScan is on {session.get('session_name')}, not the session the scraper last saw")
     bills = [b for b in r["masterlist"].values() if isinstance(b, dict) and "bill_id" in b]
     for b in bills:
         s = int(b.get("status") or 0)
         if s in (2, 3, 4, 5) and not re.match(r"^[HSA]C?R\d", b["number"]):  # HR, SR, HCR...: resolutions never become law
             chamber = "upper" if b["number"].startswith("S") else "lower"
-            yield f"{st}-ls{b['bill_id']}-{s}", {**b, "state": st, "status": (s, chamber, b["status_date"]), "_date": b["status_date"]}
+            item = {**b, "state": st, "status": (s, chamber, b["status_date"]), "_date": b["status_date"]}
+            if known is None:
+                yield f"{st}-ls{b['bill_id']}-{s}", item
+            elif (k := known["bills"].get(bill_num(b["number"]))) and s > k[2] and b["status_date"] >= known["at"]:
+                yield f"{st}-{k[0]}-{k[1]}-{s}", {**item, "_session": k[0], "number": k[1]}
 
 
 def legiscan_update(b):
+    """No sponsor in LegiScan's bill list; leaving it out keeps the one a scraper found."""
     st, (status, chamber, day), num = b["state"], b["status"], b["number"]
     desc = b.get("description") or ""
     return {
-        "id": f"states/{st.lower()}/{b['url'].rstrip('/').rsplit('/', 1)[-1]}-{slug(num)}", "where": STATES[st], "state": st,
-        "label": re.sub(r"^([A-Z]+)(\d+)$", r"\1 \2", num), "resolution": False, "title": b["title"], "official_url": b["url"],
-        "sponsor": None, "date": day, "stage": state_stage(st, status, chamber), "milestone": True,
+        "id": f"states/{st.lower()}/{slug(b.get('_session') or b['url'].rstrip('/').rsplit('/', 1)[-1])}-{slug(num)}", "where": STATES[st],
+        "state": st, "label": re.sub(r"^([A-Z]+)(\d+)$", r"\1 \2", num), "resolution": False, "title": b["title"], "official_url": b["url"],
+        "date": day, "stage": state_stage(st, status, chamber), "milestone": True,
         "source": b["title"] if desc in ("", b["title"]) else f"{b['title']}. {desc}",
     }
 
@@ -326,6 +358,21 @@ def legiscan_state(st):
         if prev.get("status") != "failed":
             alert(f"PlainGov: {STATES[st]} (LegiScan) failed", f"{ex!r}\n\nStatus page: {SITE_URL}/status/")
     return h
+
+
+def legiscan_backup(st):
+    """Fill in a broken scraper's state from LegiScan. Once a day per state at most (failed scrapers retry every 2 hours),
+    so even all 50 failing at once stays far under LegiScan's 10,000 free queries a month."""
+    known = load(f"{DATA}/state/ids-{st.lower()}.json", None)
+    if not known:  # no good scrape to map bill IDs onto yet
+        return set_health(st, backup="")
+    h = set_health(st, backup_at=time.time(), backup="LegiScan")  # set first: process() rebuilds /status
+    try:
+        process(f"states-{st.lower()}", legiscan_items(st, known), legiscan_update)
+        return h
+    except Exception as ex:
+        print(f"{st} LegiScan backup failed: {ex!r}", file=sys.stderr, flush=True)
+        return set_health(st, backup="")
 
 
 def scrape_state(st):
@@ -365,7 +412,8 @@ def scrape_state(st):
     stats = {}
     if status == "ok":
         new, done, failed = process(f"states-{st.lower()}", state_items(st), state_update)
-        stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed}
+        save_ids(st)
+        stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed, "backup": ""}
     h = set_health(st, status=status, error=error[-800:], last_end=time.time(), site=site, **stats)
     if status == "failed" and prev.get("status") != "failed":
         up = site_status(site)
@@ -375,6 +423,8 @@ def scrape_state(st):
               f"Rerun: ssh plaingov.exe.xyz 'cd plaingov && python3 plaingov.py scrape {st}'")
     elif status == "ok" and prev.get("status") == "failed":
         alert(f"PlainGov: {name} scraper recovered", f"{name} scraped {bills} bills successfully again.")
+    if status == "failed" and os.environ.get("LEGISCAN_API_KEY") and time.time() - prev.get("backup_at", 0) > RESCRAPE_HOURS * 3600:
+        h = legiscan_backup(st)
     return h
 
 
@@ -659,7 +709,7 @@ or got vetoed. Then we explain each one in a few plain sentences, with a simple 
 <h2>Where it comes from</h2>
 <p>Straight from the source: <a href="https://www.congress.gov">Congress.gov</a> for Congress, and each state legislature's own website
 for the states, using the open-source <a href="https://github.com/openstates/openstates-scrapers">Open States</a> scrapers. For a few states
-whose websites block automated visitors, we use <a href="https://legiscan.com">LegiScan</a> (CC BY 4.0). Every page links to the official bill.</p>
+whose websites block automated visitors, and while a state's website is having trouble, we use <a href="https://legiscan.com">LegiScan</a> (CC BY 4.0). Every page links to the official bill.</p>
 <h2>How we use AI</h2>
 <p>AI (Anthropic's Claude) rewrites the official text in plain English. Another AI model (jev) helps us pick the stories most people would care
 about for <a href="https://x.com/plaingov">our X account</a>. AI can get things wrong or leave things out, so if a bill matters to you,
@@ -730,7 +780,8 @@ def build_site():
 def status_body(health):
     label = {"ok": "All good", "running": "Checking now", "failed": "Having trouble", "needs setup": "Coming soon"}
     rows = "".join(
-        f"<tr><td><a href=\"/states/{st.lower()}/\">{n}</a></td><td>{label.get(h.get('status'), 'Not checked yet')}</td>"
+        f"<tr><td><a href=\"/states/{st.lower()}/\">{n}</a></td>"
+        f"<td>{'Using backup source' if h.get('status') == 'failed' and h.get('backup') else label.get(h.get('status'), 'Not checked yet')}</td>"
         f"<td>{time.strftime('%b %-d, %-I:%M %p UTC', time.gmtime(h['last_ok'])) if h.get('last_ok') else '—'}</td><td>{h.get('bills', '—')}</td></tr>"
         for st, n, h in sorted(((st, n, health.get(st, {})) for st, n in STATES.items()), key=lambda x: x[1]))
     return ("<h1>Is everything working?</h1><p class=lede>We check every state legislature's website about once a day. "
