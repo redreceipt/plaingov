@@ -831,15 +831,16 @@ def serve():
 # --- X ----------------------------------------------------------------------
 
 def tweet_text(r):
-    """Milestones (passed a chamber or further) link to the bill page; X charges much more for posts with links."""
-    head = f"{r['where']}: {r['headline']}"
+    """One block (what changes, for whom), then bill, status, and date. The site keeps its headline + summary.
+    Milestones (passed a chamber or further) link to the bill page; X charges much more for posts with links."""
+    head = f"{r['where']}: "
     tail = f"{r['label']} · {r['stage']['short']} ({date(r['date'], '%b %-d' if r['date'][:4] == time.strftime('%Y') else '%b %-d, %Y')})"
     url = f"{SITE_URL}/{r['id']}/" if r["milestone"] else ""
-    room = 280 - len(head) - len(tail) - 4 - (URL_LEN + 1 if url else 0)  # 4 = blank-line separators
+    room = 280 - len(head) - len(tail) - 2 - (URL_LEN + 1 if url else 0)  # 2 = blank-line separator
     body = r["tweet"]
     if len(body) > room:  # "…" weighs 2 on X, hence room - 2
         body = body[: room - 2].rsplit(" ", 1)[0].rstrip(",;:") + "…"
-    return f"{head}\n\n{body}\n\n{tail}" + (f"\n{url}" if url else "")
+    return f"{head}{body}\n\n{tail}" + (f"\n{url}" if url else "")
 
 
 def post_x(text):
