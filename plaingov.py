@@ -268,7 +268,8 @@ def state_update(b):
     people = [s for s in b["sponsorships"] if s["primary"]] or b["sponsorships"]
     sponsor = None
     if people:
-        title = ("Sen. " if org(b["from_organization"]) in ("upper", "legislature") else "Rep. ") if people[0].get("entity_type") == "person" else ""
+        lower = "Asm. " if st in ASSEMBLY else "Rep. "
+        title = ("Sen. " if org(b["from_organization"]) in ("upper", "legislature") else lower) if people[0].get("entity_type") == "person" else ""
         more = len(people) - 1
         sponsor = title + people[0]["name"] + (f" and {more} other{'s' if more > 1 else ''}" if more else "")
     abstract = " ".join(a["abstract"] for a in b["abstracts"])
