@@ -98,12 +98,15 @@ asked = []
 def fake(url, data, *a):
     prompt = json.loads(data)["messages"][0]["content"]
     asked.append(prompt)
+    model = json.loads(data)["model"]
     reply = ('{"1": "maybe", "2": "no"}' if "Mark each" in prompt else '{"status": "law", "date": "2026-06-04"}')
+    asked[-1] = (model, prompt)
     return json.dumps({"content": [{"type": "text", "text": reply}]})
 plaingov.fetch = fake
 ai = ai_stages("SC")
 assert ai == {"2025-2026|H 1": [4, None, "2026-06-04"]}, ai
-assert len(asked) == 2 and "1. legislature | Act No. #\n2. legislature | Debate adjourned" in asked[0] and "bill H 1" in asked[1], asked
+assert [m for m, _ in asked] == ["claude-haiku-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"], asked  # hints, cheap read, confirmation
+assert "1. legislature | Act No. #\n2. legislature | Debate adjourned" in asked[0][1] and "bill H 1" in asked[1][1], asked
 asked.clear()
 assert ai_stages("SC") == ai and not asked  # cached
 assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})

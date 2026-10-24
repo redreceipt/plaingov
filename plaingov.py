@@ -16,6 +16,7 @@ DATA = os.environ.get("DATA_DIR", os.path.expanduser("~/plaingov-data"))
 SITE_URL = os.environ.get("SITE_URL", "https://plaingov.com").rstrip("/")
 DRY_RUN = os.environ.get("DRY_RUN", "1") != "0"
 LLM_MODEL = os.environ.get("LLM_MODEL", "claude-haiku-5-5")
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-sonnet-5-5")  # confirms milestones the cheap model finds (ai_stages)
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-1.13-free")
 MAX_POSTS_PER_DAY = int(os.environ.get("MAX_POSTS_PER_DAY", "6"))
 MIN_INTEREST = float(os.environ.get("MIN_INTEREST", "1.5"))  # jev score, 0-4
@@ -513,9 +514,13 @@ Status: {status}
 Source: {source}"""
 
 
-def claude(prompt, max_tokens):
+NO_THINKING = {"claude-sonnet-5-5": {"type": "between_tools"}}  # how each model turns thinking off; default {"type": "disabled"}
+
+
+def claude(prompt, max_tokens, model=LLM_MODEL):
     """Claude via exe.dev's integration (it adds the API key): (reply text, stop reason)."""
-    body = json.dumps({"model": LLM_MODEL, "max_tokens": max_tokens, "thinking": {"type": "disabled"}, "messages": [{"role": "user", "content": prompt}]})
+    body = json.dumps({"model": model, "max_tokens": max_tokens, "thinking": NO_THINKING.get(model, {"type": "disabled"}),
+                       "messages": [{"role": "user", "content": prompt}]})
     r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", body.encode(), {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
     return "".join(c["text"] for c in r["content"] if c["type"] == "text"), r.get("stop_reason")
 
@@ -536,16 +541,20 @@ Reply with only a JSON object mapping each number to "maybe" or "no".
 {lines}"""
 
 STAGE_PROMPT = """Here is the official action history of {where} bill {identifier} ("{title}"), oldest first, as "date | chamber | action".
-How far has this bill itself gotten? Only actions on this bill count, not ones about a companion or other bill. Failed votes, committee votes and reports, and readings aren't passing. Being sent or delivered to the Governor isn't law yet. A line-item veto doesn't stop a bill from becoming law. A veto that lawmakers overrode means it became law.
+How far has this bill itself gotten? Be strict: say a milestone only if an action clearly shows it.
+- Passing a chamber means that whole chamber's final vote approving this bill. Not: committee votes or reports, "reported", placed on a calendar or general order, readings, ordered to a reading, substitutions, or failed votes.
+- Law means this bill was signed, became law without a signature, got an act or chapter number, or had a veto overridden. An action saying a companion or other bill became law doesn't make this bill law. Sent or delivered to the Governor isn't law yet. A line-item or partial veto doesn't stop a signed bill from being law.
+- A resolution adopted by both chambers is "passed both chambers", not "law".
+- Vetoed means the Governor rejected the whole bill and it wasn't overridden.
 Reply with only JSON: {{"status": "none", "passed one chamber", "passed both chambers", "law", or "vetoed", "chamber": "upper" or "lower" (for "passed one chamber"), "date": "YYYY-MM-DD" of the action that got it there}}
 
 {lines}"""
 STATUSES = {"passed one chamber": 2, "passed both chambers": 3, "law": 4, "vetoed": 5}
 
 
-def ask_json(prompt, max_tokens):
+def ask_json(prompt, max_tokens, model=LLM_MODEL):
     """The first JSON object in Claude's reply (it sometimes adds a note after)."""
-    text, stop = claude(prompt, max_tokens)
+    text, stop = claude(prompt, max_tokens, model)
     if "{" not in text:
         raise ValueError(f"no JSON from LLM (stop_reason={stop}): {text[:200]!r}")
     return json.JSONDecoder().raw_decode(text[text.index("{"):])[0]
@@ -568,11 +577,11 @@ def label_actions(st, bills):
     return labels
 
 
-def judge_stage(st, b):
+def judge_stage(st, b, model=LLM_MODEL):
     """Claude reads a bill's whole history: [status, chamber, date], or None if no milestone."""
     acts = sorted(b["actions"], key=lambda a: a["date"])[-80:]
     out = ask_json(STAGE_PROMPT.format(where=STATES[st], identifier=b["identifier"], title=b["title"][:300], lines="\n".join(
-        f"{a['date'][:10]} | {org(a.get('organization_id')) or '-'} | {a['description'][:300]}" for a in acts)), 200)
+        f"{a['date'][:10]} | {org(a.get('organization_id')) or '-'} | {a['description'][:300]}" for a in acts)), 1000, model)
     status, day = STATUSES.get(out.get("status")), str(out.get("date", ""))
     if not status or day not in {a["date"][:10] for a in acts}:
         return None
@@ -582,8 +591,9 @@ def judge_stage(st, b):
 def ai_stages(st):
     """State sites word laws and vetoes their own way, and sites change, so some milestones reach us unclassified
     (SC "Act No. 245", NE "Returned by Governor without approval"). When a bill not yet law has unclassified actions
-    after its last known milestone that might matter (label_actions), Claude reads its whole history. Cached until its
-    actions change. Returns {"session|identifier": [status, chamber, date] or None}."""
+    after its last known milestone that might matter (label_actions), Claude reads its whole history; when the cheap
+    model says it got further, JUDGE_MODEL decides (the cheap one misreads e.g. companion bills and committee votes).
+    Cached until its actions change. Returns {"session|identifier": [status, chamber, date] or None}."""
     path = f"{DATA}/state/stages-{st.lower()}.json"
     cache = load(path, {})
     bills = [b for b in (json.load(open(f)) for f in scraped(st)) if set(b["classification"]) & BILLS]
@@ -596,11 +606,14 @@ def ai_stages(st):
         if any(not a["classification"] and a["date"][:10] >= (det[2] if det else "") and labels.get(action_key(a)) == "maybe" for a in b["actions"]):
             key, h = f"{b['legislative_session']}|{b['identifier']}", hashlib.sha1(json.dumps(b["actions"], sort_keys=True).encode()).hexdigest()[:12]
             if cache.get(key, {}).get("h") != h:
-                todo.append((key, h, b))
+                todo.append((key, h, b, det))
 
     def one(t):
         try:
-            return t[0], {"h": t[1], "s": judge_stage(st, t[2])}
+            s = judge_stage(st, t[2])
+            if s and RANK[s[0]] > RANK[t[3] and t[3][0]]:
+                s = judge_stage(st, t[2], JUDGE_MODEL)
+            return t[0], {"h": t[1], "s": s}
         except Exception as ex:  # asked again next scrape
             print(f"{st} {t[0]}: stage check failed: {ex!r}", file=sys.stderr, flush=True)
 
