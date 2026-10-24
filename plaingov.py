@@ -140,8 +140,8 @@ STATES = {
 }
 ASSEMBLY = {"CA", "NV", "NY", "NJ", "WI"}  # lower chamber is called the Assembly
 KEYS = {"NY": "NEW_YORK_API_KEY", "IN": "INDIANA_API_KEY", "VA": "VA_API_KEY"}  # free keys from each legislature
-# shortcut: California's scraper needs the state's database dumps loaded into MySQL; add a MySQL sidecar to cover it
-UNSUPPORTED = {"CA": "California's scraper needs its database dumps loaded into MySQL first"}
+# California's image bundles MySQL, loads the state's database dumps, then scrapes; its entrypoint supplies "ca".
+CA_IMAGE = os.environ.get("CA_SCRAPER_IMAGE", "openstates/scrapers-california:latest")
 LAW = {"became-law", "executive-signature", "veto-override-passage"}
 RPM = {"UT": 20, "WI": 20}  # requests/minute for sites that rate-limit the default 60
 # Sites that block automated visitors (IP blocks, Cloudflare challenges): use LegiScan's API there instead (CC BY 4.0).
@@ -333,8 +333,8 @@ def scrape_state(st):
     if st in LEGISCAN_STATES:
         return legiscan_state(st)
     name, prev = STATES[st], load(HEALTH, {}).get(st, {})
-    if st in UNSUPPORTED or (st in KEYS and not os.environ.get(KEYS[st])):
-        return set_health(st, status="needs setup", error=UNSUPPORTED.get(st) or f"needs {KEYS[st]}", last_start=time.time())
+    if st in KEYS and not os.environ.get(KEYS[st]):
+        return set_health(st, status="needs setup", error=f"needs {KEYS[st]}", last_start=time.time())
     out = f"{DATA}/scrape/{st.lower()}"
     os.makedirs(out, exist_ok=True)
     # The image only runs as root (its Python env lives in /root), so clean up and hand files back via the image too.
@@ -345,7 +345,7 @@ def scrape_state(st):
     subprocess.run(["docker", "rm", "-f", box], capture_output=True)  # left over if the daemon restarted mid-scrape
     cmd = ["docker", "run", "--rm", "--name", box, "-v", f"{out}:/data",
            *[a for k in KEYS.values() if os.environ.get(k) for a in ("-e", k)],
-           SCRAPER_IMAGE, st.lower(), "bills", "--scrape", "--datadir", "/data", "--rpm", str(RPM.get(st, 60))]
+           *([CA_IMAGE] if st == "CA" else [SCRAPER_IMAGE, st.lower()]), "bills", "--scrape", "--datadir", "/data", "--rpm", str(RPM.get(st, 60))]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=22 * 3600)
         ok, log = p.returncode == 0, (p.stdout + p.stderr)[-2000:]
@@ -401,7 +401,8 @@ def scrape(only=None):
             set_health(st, last_start=0)
     while True:
         if time.time() - pulled > 86400:
-            subprocess.run(["docker", "pull", "-q", SCRAPER_IMAGE], capture_output=True)
+            for image in (SCRAPER_IMAGE, CA_IMAGE):
+                subprocess.run(["docker", "pull", "-q", image], capture_output=True)
             pulled = time.time()
         for st, f in list(running.items()):
             if f.done():
