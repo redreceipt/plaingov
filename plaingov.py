@@ -685,7 +685,7 @@ def ai_stages(st):
     NE "Returned by Governor without approval") and mislabel others (HI's "Passed Second Reading" as passage).
     STAGE_MODEL reads the history of each bill short of law with a classified milestone or unclassified actions, if it
     moved in the last BACKFILL_DAYS (older bills aren't news, and checking whole sessions costs ~30x more). Laws are
-    trusted. Cached until a bill's actions change. Returns {"session|identifier": [status, chamber, date] or None}."""
+    trusted. Cached until a bill's actions, the prompt, or the model change. Returns {"session|identifier": [status, chamber, date] or None}."""
     path = f"{DATA}/state/stages-{st.lower()}.json"
     cache = load(path, {})
     since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - BACKFILL_DAYS * 86400))
@@ -696,7 +696,8 @@ def ai_stages(st):
             continue
         det = bill_stage(b)
         if (det and det[0] != 4) or (not det and any(not a["classification"] for a in b["actions"])):
-            key, h = f"{b['legislative_session']}|{b['identifier']}", hashlib.sha1(json.dumps(b["actions"], sort_keys=True).encode()).hexdigest()[:12]
+            # the prompt and model are part of the hash, so improving either re-checks every bill
+            key, h = f"{b['legislative_session']}|{b['identifier']}", hashlib.sha1((json.dumps(b["actions"], sort_keys=True) + STAGE_PROMPT + STAGE_MODEL).encode()).hexdigest()[:12]
             if cache.get(key, {}).get("h") != h:
                 todo.append((key, h, b))
 

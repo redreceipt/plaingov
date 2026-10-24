@@ -115,6 +115,9 @@ assert ai == {"2025-2026|H 1": [4, None, today]}, ai  # H 2 is old news, H 3 is 
 assert [m for m, _ in asked] == ["gpt-6-luna"] and "bill H 1 " in asked[0][1] and "Act No. 245" in asked[0][1], asked
 asked.clear()
 assert ai_stages("VT") == ai and not asked  # cached
+plaingov.STAGE_PROMPT += " "  # a changed prompt re-checks cached bills
+assert ai_stages("VT") == ai and len(asked) == 1, asked
+plaingov.STAGE_PROMPT = plaingov.STAGE_PROMPT[:-1]
 # An answer without a usable date isn't "no milestone": the classified stage stays and it's asked again next scrape.
 plaingov.fetch = lambda url, data, *a: json.dumps({"choices": [{"message": {"content": '{"status": "vetoed", "chamber": ""}'}}]})
 try:
