@@ -1,4 +1,6 @@
-from plaingov import legiscan_update, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
+import json, os, tempfile
+import plaingov
+from plaingov import legiscan_items, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
 
 rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": "S. 4618", "resolution": False,
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
@@ -53,4 +55,27 @@ ls = legiscan_update({"state": "IL", "status": (2, "upper", "2026-03-01"), "numb
                      "url": "https://legiscan.com/IL/bill/SB1234/2025"})
 assert (ls["id"], ls["label"], ls["stage"]["short"], ls["source"]) == ("states/il/2025-sb1234", "SB 1234", "Passed the Senate", "Taxes"), ls
 assert "LegiScan" in bill_page({**rec, **ls, "headline": "h", "summary": "s", "updates": []})
+
+# A broken scraper's LegiScan backup reuses the scraper's bill IDs and post keys, and only adds newer milestones.
+plaingov.DATA = tempfile.mkdtemp()
+os.makedirs(f"{plaingov.DATA}/scrape/sc/sc")
+for i, (sess, ident, acts) in enumerate([("2025-2026", "H 3305", [act("2026-02-01", ["passage"], LOW)]), ("2025-2026", "S 12", []),
+                                         ("2025-2026", "S 99", []), ("2025e1", "H 3305", [])]):
+    json.dump({"legislative_session": sess, "identifier": ident, "classification": ["bill"], "actions": acts}, open(f"{plaingov.DATA}/scrape/sc/sc/bill_{i}.json", "w"))
+save_ids("SC")
+os.environ["LEGISCAN_API_KEY"] = "test"
+ml = lambda year: {"session": {"year_start": year, "special": 0, "session_name": f"{year} Regular"}, **{str(i): {
+    "bill_id": i, "number": n, "status": s, "status_date": "2026-10-01", "title": "T", "url": f"https://legiscan.com/SC/bill/{n}/2025"}
+    for i, (n, s) in enumerate([("H3305", 3), ("H3305", 2), ("S0012", 2), ("H4000", 4)])}}
+plaingov.fetch = lambda *a, **k: json.dumps({"status": "OK", "masterlist": ml(2025)})
+got = dict(legiscan_items("SC", json.load(open(f"{plaingov.DATA}/state/ids-sc.json"))))
+assert list(got) == ["SC-2025-2026-H 3305-3", "SC-2025-2026-S 12-2"], got
+assert legiscan_update(got["SC-2025-2026-H 3305-3"])["id"] == s["id"]
+plaingov.fetch = lambda *a, **k: json.dumps({"status": "OK", "masterlist": ml(2027)})
+try:
+    list(legiscan_items("SC", json.load(open(f"{plaingov.DATA}/state/ids-sc.json"))))
+    raise AssertionError("matched bills across sessions")
+except RuntimeError:
+    pass
+assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})
 print("ok")
