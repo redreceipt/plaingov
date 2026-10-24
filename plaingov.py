@@ -783,7 +783,7 @@ def serve():
 def tweet_text(r):
     """Milestones (passed a chamber or further) link to the bill page; X charges much more for posts with links."""
     head = f"{r['where']}: {r['headline']}"
-    tail = f"{r['label']} · {r['stage']['short']} ({date(r['date'], '%b %-d')})"
+    tail = f"{r['label']} · {r['stage']['short']} ({date(r['date'], '%b %-d' if r['date'][:4] == time.strftime('%Y') else '%b %-d, %Y')})"
     url = f"{SITE_URL}/{r['id']}/" if r["milestone"] else ""
     room = 280 - len(head) - len(tail) - 4 - (URL_LEN + 1 if url else 0)  # 4 = blank-line separators
     body = r["tweet"]
