@@ -330,11 +330,10 @@ def legiscan_state(st):
 
 def scrape_state(st):
     """Run one state's scraper, publish its new milestones, and alert when its health changes."""
-    if st in LEGISCAN_STATES:
+    # Blocked sites, and states still waiting on their legislature's API key, use LegiScan in the meantime.
+    if st in LEGISCAN_STATES or (st in KEYS and not os.environ.get(KEYS[st])):
         return legiscan_state(st)
     name, prev = STATES[st], load(HEALTH, {}).get(st, {})
-    if st in KEYS and not os.environ.get(KEYS[st]):
-        return set_health(st, status="needs setup", error=f"needs {KEYS[st]}", last_start=time.time())
     out = f"{DATA}/scrape/{st.lower()}"
     os.makedirs(out, exist_ok=True)
     # The image only runs as root (its Python env lives in /root), so clean up and hand files back via the image too.
