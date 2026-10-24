@@ -1,6 +1,6 @@
 import json, os, tempfile, time, urllib.error
 import plaingov
-from plaingov import ai_stages, posting_hours, report_text, doc_text, rewrite, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
+from plaingov import ai_stages, take_pages, posting_hours, report_text, doc_text, rewrite, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
 
 rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": "S. 4618", "resolution": False,
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
@@ -169,5 +169,10 @@ assert report_text([]) == "No posts in the last 7 days."
 # Posts go out during U.S. daytime (8am-9pm Eastern), DST included.
 assert posting_hours(1792846800) and not posting_hours(1792803600)  # 9am Oct 24 vs 9pm Oct 23, 2026 (EDT)
 assert posting_hours(1799762400) and not posting_hours(1799730000)  # Jan 12, 2027: 9am vs midnight EST
+# The daily page cap is shared across feeds and resets each day.
+plaingov.MAX_PAGES_PER_DAY = 5
+assert (take_pages(3), take_pages(3), take_pages(1)) == (3, 2, 0)
+json.dump({"day": "2000-01-01", "pages": 5}, open(f"{plaingov.DATA}/state/budget.json", "w"))
+assert take_pages(9) == 5
 assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})
 print("ok")

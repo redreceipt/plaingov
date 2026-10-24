@@ -19,6 +19,7 @@ python3 plaingov.py scrape SC  # scrape one state now
 python3 plaingov.py post       # post the most interesting queued update to @plaingov
 python3 plaingov.py site       # rebuild the static site
 python3 plaingov.py refresh    # rewrite existing pages after a prompt change (PROMPT_VERSION)
+python3 plaingov.py catchup    # pages for each state's 25 most recent laws and vetoes this year (no posts)
 python3 plaingov.py report     # X engagement for the last 7 days (emailed weekly by the hourly post run)
 python3 test_plaingov.py       # self-check
 ```
@@ -39,6 +40,7 @@ Environment (`~/plaingov.env` on the VM, never committed):
 | `ALERT_EMAIL` | where scraper alerts go (exe.dev only emails the VM owner) |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | @plaingov's OAuth 1.0a keys (read+write) |
 | `DRY_RUN` | `1` (default) prints posts instead of sending |
+| `MAX_PAGES_PER_DAY` | new AI-written pages per day across all feeds (default 200, about $0.80); newest first, the rest wait |
 | `MAX_POSTS_PER_DAY`, `MIN_INTEREST`, `BACKFILL_DAYS`, `PARALLEL`, `RESCRAPE_HOURS`, `SITE_URL`, `LLM_MODEL`, `STAGE_MODEL`, `JEV_MODEL`, `DATA_DIR` | optional overrides |
 
 ## Monitoring

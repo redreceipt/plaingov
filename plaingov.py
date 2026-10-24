@@ -6,6 +6,7 @@ Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post qu
        plaingov.py post       post the most interesting queued update to X (@plaingov)
        plaingov.py site       rebuild the site only
        plaingov.py refresh    rewrite existing pages from before the current prompt (PROMPT_VERSION)
+       plaingov.py catchup    pages for each state's 25 most recent laws and vetoes this year (no posts)
        plaingov.py report     X engagement for the last 7 days (the hourly post run sends it weekly)
 
 A feed's first run builds pages for what's already listed (states: last BACKFILL_DAYS) and queues no posts.
@@ -21,6 +22,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "claude-haiku-5-5")
 STAGE_MODEL = os.environ.get("STAGE_MODEL", "gpt-6-luna")  # reads bill histories (ai_stages): 38/38 on a hand-checked set, ~$0.0002 a bill
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-1.13-free")
 MAX_POSTS_PER_DAY = int(os.environ.get("MAX_POSTS_PER_DAY", "6"))
+MAX_PAGES_PER_DAY = int(os.environ.get("MAX_PAGES_PER_DAY", "200"))  # new AI-written pages, all feeds (~$0.004 each, so <= ~$25/month)
 MIN_INTEREST = float(os.environ.get("MIN_INTEREST", "1.5"))  # jev score, 0-4
 BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "60"))
 SCRAPER_IMAGE = os.environ.get("SCRAPER_IMAGE", "openstates/scrapers:latest")
@@ -997,33 +999,63 @@ def status_body(health):
             f"<table><thead><tr><th>State</th><th>Status</th><th>Last good check</th><th>Bills we're tracking</th></tr></thead><tbody>{rows}</tbody></table>")
 
 
-def refresh():
-    """Rewrite existing pages from before PROMPT_VERSION with fresh sources (bill text, official actions). Queues no posts."""
-    stale = lambda id: (load(f"{DATA}/bills/{id}.json", None) or {"v": PROMPT_VERSION}).get("v") != PROMPT_VERSION
-    jobs = []
-    for st in STATES:
-        if st in LEGISCAN_STATES or (st in KEYS and not os.environ.get(KEYS[st])):
-            jobs += [(legiscan_update, v) for _, v in legiscan_items(st) if stale(legiscan_id(v))] if os.environ.get("LEGISCAN_API_KEY") else []
-        elif scraped(st):
-            jobs += [(state_update, v) for _, v in state_items(st, ai_stages(st)) if stale(state_id(v))]
-    for f in glob.glob(f"{DATA}/bills/us/*.json"):
-        rec = json.load(open(f))
-        if rec.get("v") != PROMPT_VERSION:
-            c, t, n = re.match(r"us/(\d+)-([a-z]+)-(\d+)$", rec["id"]).groups()
-            jobs.append((congress_update, api(f"bill/{c}/{t}/{n}")["bill"]))
+def state_feed(st):
+    """(items, update, page id) for a state's current source, or None if there isn't one."""
+    if st in LEGISCAN_STATES or (st in KEYS and not os.environ.get(KEYS[st])):
+        return (list(legiscan_items(st)), legiscan_update, legiscan_id) if os.environ.get("LEGISCAN_API_KEY") else None
+    return (list(state_items(st, ai_stages(st))), state_update, state_id) if scraped(st) else None
 
+
+def save_all(jobs, what):
+    """Save (update, item) jobs in parallel and rebuild the site; returns how many were saved. Failures wait for next time."""
     def one(job):
         try:
             return save(job[0](job[1]))
-        except Exception as ex:  # left as is; the next refresh tries again
-            print(f"FAILED refresh: {ex!r}"[:300], file=sys.stderr, flush=True)
+        except Exception as ex:
+            print(f"FAILED {what}: {ex!r}"[:300], file=sys.stderr, flush=True)
 
     with ThreadPoolExecutor(6) as pool:
         done = sum(bool(r) for r in pool.map(one, jobs))
     with lock:
         build_site()
+    return done
+
+
+def refresh():
+    """Rewrite existing pages from before PROMPT_VERSION with fresh sources (bill text, official actions). Queues no posts."""
+    stale = lambda id: (load(f"{DATA}/bills/{id}.json", None) or {"v": PROMPT_VERSION}).get("v") != PROMPT_VERSION
+    jobs = []
+    for st in STATES:
+        if feed := state_feed(st):
+            items, update, page = feed
+            jobs += [(update, v) for _, v in items if stale(page(v))]
+    for f in glob.glob(f"{DATA}/bills/us/*.json"):
+        rec = json.load(open(f))
+        if rec.get("v") != PROMPT_VERSION:
+            c, t, n = re.match(r"us/(\d+)-([a-z]+)-(\d+)$", rec["id"]).groups()
+            jobs.append((congress_update, api(f"bill/{c}/{t}/{n}")["bill"]))
+    done = save_all(jobs, "refresh")
     left = sum(json.load(open(f)).get("v") != PROMPT_VERSION for f in glob.glob(f"{DATA}/bills/**/*.json", recursive=True))
     print(f"refresh: {done} of {len(jobs)} pages rewritten; {left} still on an older prompt (no current source, or failed)")
+
+
+def catchup(per_state=25):
+    """Give every state pages for its most recent laws and vetoes this year (up to `per_state`), so states whose session
+    ended before we started aren't empty. Old news, so nothing is posted."""
+    year, jobs, keys = time.strftime("%Y-01-01"), [], {}
+    for st in STATES:
+        if feed := state_feed(st):
+            items, update, page = feed
+            missing = [(k, v) for k, v in items if v["status"][0] in (4, 5) and v["_date"] >= year and not os.path.exists(f"{DATA}/bills/{page(v)}.json")]
+            for k, v in sorted(missing, key=lambda kv: kv[1]["_date"], reverse=True)[:per_state]:
+                jobs.append((update, v))
+                keys.setdefault(st, []).append((k, page(v)))
+    done = save_all(jobs, "catchup")
+    with queue_lock():  # mark them seen, so the next scrape doesn't treat them as new
+        for st, kp in keys.items():
+            path = f"{DATA}/state/states-{st.lower()}.json"
+            write(path, json.dumps(sorted(set(load(path, [])) | {k for k, pid in kp if os.path.exists(f"{DATA}/bills/{pid}.json")})))
+    print(f"catchup: {done} of {len(jobs)} pages built across {len(keys)} states")
 
 
 def serve():
@@ -1191,11 +1223,22 @@ def post_best():
 
 @contextlib.contextmanager
 def queue_lock():
-    """The scraper daemon and the hourly poster both edit the post queue."""
+    """The scraper daemon and the hourly jobs share the post queue, seen-item files, and the page budget."""
     os.makedirs(f"{DATA}/state", exist_ok=True)
     with open(f"{DATA}/state/.queue.lock", "w") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         yield
+
+
+def take_pages(n):
+    """Reserve up to n of today's MAX_PAGES_PER_DAY new AI pages; returns how many we got."""
+    with queue_lock():
+        path, day = f"{DATA}/state/budget.json", time.strftime("%Y-%m-%d")
+        b = load(path, {})
+        used = b.get("pages", 0) if b.get("day") == day else 0
+        got = max(0, min(n, MAX_PAGES_PER_DAY - used))
+        write(path, json.dumps({"day": day, "pages": used + got}))
+        return got
 
 
 def process(feed, items, update):
@@ -1205,7 +1248,9 @@ def process(feed, items, update):
     seen = set(load(path, []))
     new = [(k, v) for k, v in dict(items).items() if k not in seen]
     cutoff = time.strftime("%Y-%m-%d", time.gmtime(time.time() - BACKFILL_DAYS * 86400))
-    todo = [(k, v) for k, v in new if not first or v.get("_date", "9999") >= cutoff]
+    todo = sorted(((k, v) for k, v in new if not first or v.get("_date", "9999") >= cutoff), key=lambda kv: kv[1].get("_date", ""), reverse=True)
+    waiting = len(todo) - (allowed := take_pages(len(todo)))
+    todo = todo[:allowed]  # newest first; the rest stay unseen and wait for another day's budget
 
     def one(kv):
         try:
@@ -1230,7 +1275,8 @@ def process(feed, items, update):
     with lock:
         build_site()
     failed = len(todo) - len(done)
-    print(f"{feed}: {len(new)} new, {len(done)} pages updated, {failed} failed{' (first run: no posts queued)' if first else ''}", flush=True)
+    print(f"{feed}: {len(new)} new, {len(done)} pages updated, {failed} failed{f', {waiting} over the daily page cap' if waiting else ''}"
+          f"{' (first run: no posts queued)' if first else ''}", flush=True)
     return len(new), len(done), failed
 
 
@@ -1238,4 +1284,4 @@ if __name__ == "__main__":
     cmd, arg = sys.argv[1], (sys.argv[2:] or [None])[0]
     if cmd == "congress":
         sys.exit(1 if process("congress", congress_items(), congress_update)[2] else 0)
-    {"site": build_site, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh, "report": report}[cmd]()
+    {"site": build_site, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh, "catchup": catchup, "report": report}[cmd]()
