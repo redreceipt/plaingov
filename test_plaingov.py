@@ -1,6 +1,6 @@
 import json, os, tempfile, time
 import plaingov
-from plaingov import ai_stages, report_text, doc_text, rewrite, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
+from plaingov import ai_stages, posting_hours, report_text, doc_text, rewrite, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
 
 rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": "S. 4618", "resolution": False,
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
@@ -144,5 +144,8 @@ rows = [{"id": "1", "bill": "us/a", "stage": "It's law", "where": "federal", "li
 t = report_text(rows)
 assert "2 posts. Totals: impression 140, like 3" in t and "link True (1): 100 / 3 / 0 / 0" in t and t.index("status/1") < t.index("status/2"), t
 assert report_text([]) == "No posts in the last 7 days."
+# Posts go out during U.S. daytime (8am-9pm Eastern), DST included.
+assert posting_hours(1792846800) and not posting_hours(1792803600)  # 9am Oct 24 vs 9pm Oct 23, 2026 (EDT)
+assert posting_hours(1799762400) and not posting_hours(1799730000)  # Jan 12, 2027: 9am vs midnight EST
 assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})
 print("ok")
