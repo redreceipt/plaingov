@@ -534,9 +534,9 @@ How far has this bill itself gotten? Be strict: say a milestone only if an actio
 - In a one-chamber legislature (like Nebraska's), its final passage counts as "passed both chambers".
 - Passing both chambers means both approved the same final version, so it goes to the Governor. If they passed different versions and still have to agree (like a conference committee), it has passed one chamber: the first one that passed it.
 - Law means this bill was signed, became law without a signature, got an act or chapter number, or had a veto overridden. Sent or delivered to the Governor isn't law yet. A line-item or partial veto doesn't stop a signed bill from being law.
-- Actions about a companion or substitute bill (like "Comp. became Pub. Ch. 157" or "Companion House Bill substituted"; "Comp." means companion) are about that other bill, which has its own page: they don't move this bill forward.
+- Actions about a companion bill (like "Comp. became Pub. Ch. 157" or "Companion House Bill substituted"; "Comp." means companion) are about that other bill, which has its own page: they don't move this bill forward. But when this bill is substituted for another one (like "Substituted for S4059") and then passes, that vote counts for this bill.
 - A resolution adopted by both chambers is "passed both chambers", not "law".
-- Vetoed means the Governor rejected the whole bill and lawmakers didn't override it (including when an override vote failed or the veto was sustained).
+- Vetoed means the Governor rejected the whole bill and lawmakers didn't override it (including when an override vote failed or the veto was sustained). A veto stays "vetoed" while an override is pending or possible (like "Consideration of Governor's veto pending"). A conditional veto that lawmakers then accepted counts as "passed both chambers" again.
 Reply with only JSON with all three keys, like {{"status": "passed one chamber", "chamber": "upper", "date": "2026-03-05"}}. status is "none", "passed one chamber", "passed both chambers", "law", or "vetoed"; chamber is "upper" or "lower" for "passed one chamber", otherwise ""; date is the YYYY-MM-DD of the action that got it there.
 
 {lines}"""
