@@ -200,13 +200,12 @@ def scraped(st):
     return glob.glob(f"{DATA}/scrape/{st.lower()}/**/bill_*.json", recursive=True)  # scrapers write <datadir>/<state>/
 
 
-RANK = {None: 0, 2: 1, 3: 2, 5: 3, 4: 4}  # how far a status got; a veto can still become law
-
-
 def stage_of(b, ai):
-    """The classified actions' stage, or the AI's reading of the whole history (ai_stages) when that got further."""
-    det, s = bill_stage(b), ai.get(f"{b['legislative_session']}|{b['identifier']}")
-    return tuple(s) if s and RANK[s[0]] > RANK[det and det[0]] else det
+    """The classified actions' stage, unless the AI's reading of the whole history (ai_stages) says otherwise."""
+    det, key = bill_stage(b), f"{b['legislative_session']}|{b['identifier']}"
+    if key not in ai or (ai[key] and ai[key][0]) == (det and det[0]):
+        return det
+    return tuple(ai[key]) if ai[key] else None
 
 
 def state_items(st, ai={}):
@@ -542,7 +541,8 @@ Reply with only a JSON object mapping each number to "maybe" or "no".
 
 STAGE_PROMPT = """Here is the official action history of {where} bill {identifier} ("{title}"), oldest first, as "date | chamber | action".
 How far has this bill itself gotten? Be strict: say a milestone only if an action clearly shows it.
-- Passing a chamber means that whole chamber's final vote approving this bill. Not: committee votes or reports, "reported", placed on a calendar or general order, readings, ordered to a reading, substitutions, or failed votes.
+- Passing a chamber means that whole chamber's final vote approving this bill (usually third reading). Not: committee votes or reports, "reported", placed on a calendar or general order, first or second readings, ordered to a reading, substitutions, or failed votes.
+- Passing both chambers means both approved the same final version, so it goes to the Governor. If they passed different versions and still have to agree (like a conference committee), it has passed one chamber: the first one that passed it.
 - Law means this bill was signed, became law without a signature, got an act or chapter number, or had a veto overridden. Sent or delivered to the Governor isn't law yet. A line-item or partial veto doesn't stop a signed bill from being law.
 - Actions about a companion or substitute bill (like "Comp. became Pub. Ch. 157" or "Companion House Bill substituted"; "Comp." means companion) are about that other bill, which has its own page: they don't move this bill forward.
 - A resolution adopted by both chambers is "passed both chambers", not "law".
@@ -590,11 +590,12 @@ def judge_stage(st, b, model=LLM_MODEL):
 
 
 def ai_stages(st):
-    """State sites word laws and vetoes their own way, and sites change, so some milestones reach us unclassified
-    (SC "Act No. 245", NE "Returned by Governor without approval"). When a bill not yet law has unclassified actions
-    after its last known milestone that might matter (label_actions), Claude reads its whole history; when the cheap
-    model says it got further, JUDGE_MODEL decides (the cheap one misreads e.g. companion bills and committee votes).
-    Cached until its actions change. Returns {"session|identifier": [status, chamber, date] or None}."""
+    """State sites word things their own way, and sites change, so scrapers miss milestones (SC "Act No. 245",
+    NE "Returned by Governor without approval") and mislabel others (HI's "Passed Second Reading" as passage). Claude
+    reads the whole history of bills short of law that have a classified milestone, or unclassified actions after their
+    last one that might matter (label_actions). When the cheap model disagrees with the classified stage, JUDGE_MODEL
+    decides (the cheap one misreads e.g. companion bills and committee votes). Laws are trusted.
+    Cached until a bill's actions change. Returns {"session|identifier": [status, chamber, date] or None}."""
     path = f"{DATA}/state/stages-{st.lower()}.json"
     cache = load(path, {})
     bills = [b for b in (json.load(open(f)) for f in scraped(st)) if set(b["classification"]) & BILLS]
@@ -604,7 +605,7 @@ def ai_stages(st):
         det = bill_stage(b)
         if det and det[0] == 4:
             continue
-        if any(not a["classification"] and a["date"][:10] >= (det[2] if det else "") and labels.get(action_key(a)) == "maybe" for a in b["actions"]):
+        if det or any(not a["classification"] and labels.get(action_key(a)) == "maybe" for a in b["actions"]):
             key, h = f"{b['legislative_session']}|{b['identifier']}", hashlib.sha1(json.dumps(b["actions"], sort_keys=True).encode()).hexdigest()[:12]
             if cache.get(key, {}).get("h") != h:
                 todo.append((key, h, b, det))
@@ -612,7 +613,7 @@ def ai_stages(st):
     def one(t):
         try:
             s = judge_stage(st, t[2])
-            if s and RANK[s[0]] > RANK[t[3] and t[3][0]]:
+            if (s and s[0]) != (t[3] and t[3][0]):
                 s = judge_stage(st, t[2], JUDGE_MODEL)
             return t[0], {"h": t[1], "s": s}
         except Exception as ex:  # asked again next scrape

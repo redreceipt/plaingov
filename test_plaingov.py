@@ -37,15 +37,15 @@ assert bill_stage({"actions": both}) == (3, None, "2026-03-01")
 assert bill_stage({"actions": both + [act("2026-03-09", ["executive-veto"], GOV)]}) == (5, None, "2026-03-09")
 assert bill_stage({"actions": both + [act("2026-03-05", ["executive-signature"], GOV)]}) == (4, None, "2026-03-05")
 assert bill_stage({"actions": [act("2026-02-01T00:00:00", ["passage"], '~{"classification": "legislature"}')]})[0] == 3  # Nebraska
-# The AI's reading of a bill's history (ai_stages) only counts when it got further; a veto can still become law.
+# The AI's reading of a bill's whole history (ai_stages) wins when it differs; agreeing keeps the classified date.
 sc_law = {**act("2026-06-04", [], '~{"classification": "legislature"}'), "description": "Act No. 245"}
 assert action_key(sc_law) == "legislature|Act No. #"
 h1 = {"legislative_session": "2025-2026", "identifier": "H 1", "actions": both + [sc_law]}
 assert stage_of(h1, {}) == (3, None, "2026-03-01")
 assert stage_of(h1, {"2025-2026|H 1": [4, None, "2026-06-04"]}) == (4, None, "2026-06-04")
-assert stage_of(h1, {"2025-2026|H 1": [2, "lower", "2026-02-01"]}) == (3, None, "2026-03-01")
-vetoed = {**h1, "actions": both + [act("2026-03-09", ["executive-veto"], GOV)]}
-assert stage_of(vetoed, {"2025-2026|H 1": [4, None, "2026-04-01"]})[0] == 4 and stage_of({**vetoed, "actions": both + [act("2026-03-05", ["executive-signature"], GOV)]}, {"2025-2026|H 1": [5, None, "2026-04-01"]})[0] == 4
+assert stage_of(h1, {"2025-2026|H 1": [3, None, "2026-02-27"]}) == (3, None, "2026-03-01")
+assert stage_of(h1, {"2025-2026|H 1": [2, "upper", "2026-02-01"]}) == (2, "upper", "2026-02-01")  # e.g. HI second readings
+assert stage_of(h1, {"2025-2026|H 1": None}) is None
 
 assert state_stage("CA", 2, "upper")["next"] == "Now the Assembly has to say yes too."
 assert state_stage("TX", 2, "lower")["short"] == "Passed the House"
@@ -89,25 +89,27 @@ try:
     raise AssertionError("matched bills across sessions")
 except RuntimeError:
     pass
-# ai_stages: hints pick bills whose unclassified actions might matter; Claude reads those bills' histories once (cached).
+# ai_stages: hints flag unclassified wordings; Claude reads bills with a milestone or a flagged action, and Sonnet
+# decides only where Haiku disagrees with the classified stage. Cached.
+os.makedirs(f"{plaingov.DATA}/scrape/vt/vt")
 json.dump({"legislative_session": "2025-2026", "identifier": "H 1", "title": "Budget", "classification": ["bill"], "actions": both + [sc_law]},
-          open(f"{plaingov.DATA}/scrape/sc/sc/bill_9.json", "w"))
+          open(f"{plaingov.DATA}/scrape/vt/vt/bill_1.json", "w"))
 json.dump({"legislative_session": "2025-2026", "identifier": "H 2", "title": "Roads", "classification": ["bill"],
-           "actions": both + [{**sc_law, "description": "Debate adjourned"}]}, open(f"{plaingov.DATA}/scrape/sc/sc/bill_10.json", "w"))
+           "actions": both + [{**sc_law, "description": "Debate adjourned"}]}, open(f"{plaingov.DATA}/scrape/vt/vt/bill_2.json", "w"))
 asked = []
 def fake(url, data, *a):
-    prompt = json.loads(data)["messages"][0]["content"]
-    asked.append(prompt)
-    model = json.loads(data)["model"]
-    reply = ('{"1": "maybe", "2": "no"}' if "Mark each" in prompt else '{"status": "law", "date": "2026-06-04"}')
-    asked[-1] = (model, prompt)
+    req = json.loads(data)
+    prompt = req["messages"][0]["content"]
+    asked.append((req["model"], prompt))
+    reply = ('{"1": "maybe", "2": "no"}' if "Mark each" in prompt else '{"status": "law", "date": "2026-06-04"}' if "bill H 1 " in prompt
+             else '{"status": "passed both chambers", "date": "2026-03-01"}')
     return json.dumps({"content": [{"type": "text", "text": reply}]})
 plaingov.fetch = fake
-ai = ai_stages("SC")
-assert ai == {"2025-2026|H 1": [4, None, "2026-06-04"]}, ai
-assert [m for m, _ in asked] == ["claude-haiku-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"], asked  # hints, cheap read, confirmation
-assert "1. legislature | Act No. #\n2. legislature | Debate adjourned" in asked[0][1] and "bill H 1" in asked[1][1], asked
+ai = ai_stages("VT")
+assert ai == {"2025-2026|H 1": [4, None, "2026-06-04"], "2025-2026|H 2": [3, None, "2026-03-01"]}, ai
+assert sorted(m for m, _ in asked) == ["claude-haiku-5-5"] * 3 + ["claude-sonnet-5-5"], asked  # hints, 2 reads, 1 confirmation
+assert "1. legislature | Act No. #\n2. legislature | Debate adjourned" in asked[0][1], asked
 asked.clear()
-assert ai_stages("SC") == ai and not asked  # cached
+assert ai_stages("VT") == ai and not asked  # cached
 assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})
 print("ok")
