@@ -16,6 +16,7 @@ DATA = os.environ.get("DATA_DIR", os.path.expanduser("~/plaingov-data"))
 SITE_URL = os.environ.get("SITE_URL", "https://plaingov.com").rstrip("/")
 DRY_RUN = os.environ.get("DRY_RUN", "1") != "0"
 LLM_MODEL = os.environ.get("LLM_MODEL", "claude-haiku-5-5")
+STAGE_MODEL = os.environ.get("STAGE_MODEL", "gpt-6-luna")  # reads bill histories (ai_stages): 38/38 on a hand-checked set, ~$0.0002 a bill
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-1.13-free")
 MAX_POSTS_PER_DAY = int(os.environ.get("MAX_POSTS_PER_DAY", "6"))
 MIN_INTEREST = float(os.environ.get("MIN_INTEREST", "1.5"))  # jev score, 0-4
@@ -194,11 +195,19 @@ def scraped(st):
     return glob.glob(f"{DATA}/scrape/{st.lower()}/**/bill_*.json", recursive=True)  # scrapers write <datadir>/<state>/
 
 
-def state_items(st):
+def stage_of(b, ai):
+    """The classified actions' stage, unless the AI's reading of the whole history (ai_stages) says otherwise."""
+    det, key = bill_stage(b), f"{b['legislative_session']}|{b['identifier']}"
+    if key not in ai or (ai[key] and ai[key][0]) == (det and det[0]):
+        return det
+    return tuple(ai[key]) if ai[key] else None
+
+
+def state_items(st, ai={}):
     """Milestones in a state's latest scrape."""
     for f in scraped(st):
         b = json.load(open(f))
-        s = bill_stage(b) if set(b["classification"]) & BILLS else None
+        s = stage_of(b, ai) if set(b["classification"]) & BILLS else None
         if s:
             yield f"{st}-{b['legislative_session']}-{b['identifier']}-{s[0]}", {**b, "state": st, "status": s, "_date": s[2]}
 
@@ -289,13 +298,13 @@ def bill_num(n):
     return re.sub(r"^([A-Z]+)0*(?=\d)", r"\1", re.sub(r"[^A-Z0-9]", "", n.upper()))
 
 
-def save_ids(st):
+def save_ids(st, ai={}):
     """Bill number -> [session, identifier, status] from a good scrape's main session, for a LegiScan backup later."""
     rows = []
     for f in scraped(st):
         b = json.load(open(f))
         if set(b["classification"]) & BILLS:
-            s = bill_stage(b)
+            s = stage_of(b, ai)
             rows.append((b["legislative_session"], b["identifier"], s[0] if s else 0, max((a["date"][:4] for a in b["actions"]), default="0")))
     # shortcut: only the session with the most bills; special-session bills (numbers can repeat) aren't backed up
     sessions = [r[0] for r in rows]
@@ -411,8 +420,9 @@ def scrape_state(st):
     status = "failed" if error else "ok"
     stats = {}
     if status == "ok":
-        new, done, failed = process(f"states-{st.lower()}", state_items(st), state_update)
-        save_ids(st)
+        ai = ai_stages(st)
+        new, done, failed = process(f"states-{st.lower()}", state_items(st, ai), state_update)
+        save_ids(st, ai)
         stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed, "backup": ""}
     h = set_health(st, status=status, error=error[-800:], last_end=time.time(), site=site, **stats)
     if status == "failed" and prev.get("status") != "failed":
@@ -498,21 +508,92 @@ Status: {status}
 Source: {source}"""
 
 
+def llm(prompt, max_tokens, model=LLM_MODEL):
+    """exe.dev's LLM integration (it adds the API keys): (reply text, stop reason). Claude via /messages, others via /chat/completions."""
+    if model.startswith("claude"):
+        body = {"model": model, "max_tokens": max_tokens, "thinking": {"type": "disabled"}, "messages": [{"role": "user", "content": prompt}]}
+        r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", json.dumps(body).encode(), {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
+        return "".join(c["text"] for c in r["content"] if c["type"] == "text"), r.get("stop_reason")
+    body = {"model": model, "max_completion_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]}
+    c = json.loads(fetch("https://llm.int.exe.xyz/v1/chat/completions", json.dumps(body).encode(), {"content-type": "application/json"}))["choices"][0]
+    return c["message"]["content"] or "", c.get("finish_reason")
+
+
 def rewrite(rec):
-    body = json.dumps({"model": LLM_MODEL, "max_tokens": 600, "thinking": {"type": "disabled"},
-                       "messages": [{"role": "user", "content": PROMPT.format(**rec, status=rec["stage"]["now"] + (
-                           " This IS law now: use present tense everywhere and never say 'would'." if rec["stage"]["step"] == 3
-                           else " This is NOT law yet: say what it would do."))}]})
-    r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", body.encode(),
-                         {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
-    text = "".join(c["text"] for c in r["content"] if c["type"] == "text")
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        raise ValueError(f"no JSON from LLM (stop_reason={r.get('stop_reason')}): {text[:200]!r}")
-    out = {k: " ".join(str(v).split()) for k, v in json.loads(m.group(0)).items()}
+    out = {k: " ".join(str(v).split()) for k, v in ask_json(PROMPT.format(**rec, status=rec["stage"]["now"] + (
+        " This IS law now: use present tense everywhere and never say 'would'." if rec["stage"]["step"] == 3
+        else " This is NOT law yet: say what it would do.")), 600).items()}
     if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out["summary"] + out["tweet"], re.I):
         raise ValueError(f"rewrite talks about its source: {out['summary'][:200]!r}")
     return {k: out[k] for k in ("headline", "tweet", "summary")}
+
+
+STAGE_PROMPT = """Here is the official action history of {where} bill {identifier} ("{title}"), oldest first, as "date | chamber | action".
+How far has this bill itself gotten? Be strict: say a milestone only if an action clearly shows it.
+- Passing a chamber means that whole chamber's final vote approving this bill (usually third reading). Not: committee votes or reports, "reported", placed on a calendar or general order, first or second readings, ordered to a reading, substitutions, or failed votes.
+- In a one-chamber legislature (like Nebraska's), its final passage counts as "passed both chambers".
+- Passing both chambers means both approved the same final version, so it goes to the Governor. If they passed different versions and still have to agree (like a conference committee), it has passed one chamber: the first one that passed it.
+- Law means this bill was signed, became law without a signature, got an act or chapter number, or had a veto overridden. Sent or delivered to the Governor isn't law yet. A line-item or partial veto doesn't stop a signed bill from being law.
+- Actions about a companion bill (like "Comp. became Pub. Ch. 157" or "Companion House Bill substituted"; "Comp." means companion) are about that other bill, which has its own page: they don't move this bill forward. But when this bill is substituted for another one (like "Substituted for S4059") and then passes, that vote counts for this bill.
+- A resolution adopted by both chambers is "passed both chambers", not "law".
+- Vetoed means the Governor rejected the whole bill and lawmakers didn't override it (including when an override vote failed or the veto was sustained). A veto stays "vetoed" while an override is pending or possible (like "Consideration of Governor's veto pending"). A conditional veto that lawmakers then accepted counts as "passed both chambers" again.
+Reply with only JSON with all three keys, like {{"status": "passed one chamber", "chamber": "upper", "date": "2026-03-05"}}. status is "none", "passed one chamber", "passed both chambers", "law", or "vetoed"; chamber is "upper" or "lower" for "passed one chamber", otherwise ""; date is the YYYY-MM-DD of the action that got it there.
+
+{lines}"""
+STATUSES = {"passed one chamber": 2, "passed both chambers": 3, "law": 4, "vetoed": 5}
+
+
+def ask_json(prompt, max_tokens, model=LLM_MODEL):
+    """The first JSON object in the reply (models sometimes add a note after)."""
+    text, stop = llm(prompt, max_tokens, model)
+    if "{" not in text:
+        raise ValueError(f"no JSON from LLM (stop_reason={stop}): {text[:200]!r}")
+    return json.JSONDecoder().raw_decode(text[text.index("{"):])[0]
+
+
+def judge_stage(st, b):
+    """STAGE_MODEL reads a bill's whole history: [status, chamber, date], or None if no milestone."""
+    acts = sorted(b["actions"], key=lambda a: a["date"])[-80:]
+    out = ask_json(STAGE_PROMPT.format(where=STATES[st], identifier=b["identifier"], title=b["title"][:300], lines="\n".join(
+        f"{a['date'][:10]} | {org(a.get('organization_id')) or '-'} | {a['description'][:300]}" for a in acts)), 2000, STAGE_MODEL)
+    status, day = STATUSES.get(out.get("status")), str(out.get("date", ""))
+    if out.get("status") == "none":
+        return None
+    if not status or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or not acts[0]["date"][:10] <= day <= acts[-1]["date"][:10]:
+        raise ValueError(f"unclear answer: {out}")  # not "none": keep the classified stage, ask again next scrape
+    return [status, out.get("chamber") if status == 2 and out.get("chamber") in ("upper", "lower") else None, day]
+
+
+def ai_stages(st):
+    """State sites word things their own way, and sites change, so scrapers miss milestones (SC "Act No. 245",
+    NE "Returned by Governor without approval") and mislabel others (HI's "Passed Second Reading" as passage).
+    STAGE_MODEL reads the history of each bill short of law with a classified milestone or unclassified actions, if it
+    moved in the last BACKFILL_DAYS (older bills aren't news, and checking whole sessions costs ~30x more). Laws are
+    trusted. Cached until a bill's actions change. Returns {"session|identifier": [status, chamber, date] or None}."""
+    path = f"{DATA}/state/stages-{st.lower()}.json"
+    cache = load(path, {})
+    since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - BACKFILL_DAYS * 86400))
+    todo = []
+    for f in scraped(st):
+        b = json.load(open(f))
+        if not set(b["classification"]) & BILLS or max((a["date"][:10] for a in b["actions"]), default="") < since:
+            continue
+        det = bill_stage(b)
+        if (det and det[0] != 4) or (not det and any(not a["classification"] for a in b["actions"])):
+            key, h = f"{b['legislative_session']}|{b['identifier']}", hashlib.sha1(json.dumps(b["actions"], sort_keys=True).encode()).hexdigest()[:12]
+            if cache.get(key, {}).get("h") != h:
+                todo.append((key, h, b))
+
+    def one(t):
+        try:
+            return t[0], {"h": t[1], "s": judge_stage(st, t[2])}
+        except Exception as ex:  # asked again next scrape
+            print(f"{st} {t[0]}: stage check failed: {ex!r}", file=sys.stderr, flush=True)
+
+    with ThreadPoolExecutor(6) as pool:
+        cache.update(d for d in pool.map(one, todo) if d)
+    write(path, json.dumps(cache, indent=0))
+    return {k: v["s"] for k, v in cache.items()}
 
 
 INTEREST = {"type": "score", "instructions": "How interesting would a typical American find this government update in their social feed?",
@@ -532,9 +613,7 @@ def interest(rec):
             raise
     prompt = (f"{INTEREST['instructions']} Score 0-4: " + "; ".join(f"{i}={c}" for i, c in enumerate(INTEREST["criteria"]))
               + f". Reply with only the number.\n\n{json.dumps(body['state'])}")
-    r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", json.dumps({"model": LLM_MODEL, "max_tokens": 10, "thinking": {"type": "disabled"},
-                         "messages": [{"role": "user", "content": prompt}]}).encode(), {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
-    return min(4.0, max(0.0, float(re.search(r"\d+(\.\d+)?", r["content"][0]["text"]).group(0))))
+    return min(4.0, max(0.0, float(re.search(r"\d+(\.\d+)?", llm(prompt, 10)[0]).group(0))))
 
 
 def score(rec):
@@ -711,7 +790,7 @@ or got vetoed. Then we explain each one in a few plain sentences, with a simple 
 for the states, using the open-source <a href="https://github.com/openstates/openstates-scrapers">Open States</a> scrapers. For a few states
 whose websites block automated visitors, and while a state's website is having trouble, we use <a href="https://legiscan.com">LegiScan</a> (CC BY 4.0). Every page links to the official bill.</p>
 <h2>How we use AI</h2>
-<p>AI (Anthropic's Claude) rewrites the official text in plain English. Another AI model (jev) helps us pick the stories most people would care
+<p>AI (Anthropic's Claude) rewrites the official text in plain English. Every legislature words things its own way, so AI also reads a bill's official history when it's unclear whether the bill passed, became law, or was vetoed. Another AI model (jev) helps us pick the stories most people would care
 about for <a href="https://x.com/plaingov">our X account</a>. AI can get things wrong or leave things out, so if a bill matters to you,
 check the official link. This isn't legal advice.</p>
 <h2>We don't take sides</h2>
@@ -798,7 +877,7 @@ def rebuild():
     health = load(HEALTH, {})
     for st in STATES:
         if health.get(st, {}).get("status") == "ok" and scraped(st):
-            process(f"states-{st.lower()}", state_items(st), state_update)
+            process(f"states-{st.lower()}", state_items(st, ai_stages(st)), state_update)
 
 
 def serve():
@@ -922,11 +1001,14 @@ def process(feed, items, update):
 
     with ThreadPoolExecutor(6) as pool:
         done = [d for d in pool.map(one, todo) if d]
+    # A milestone found late (an AI label, a scraper fix) gets its page, but old news doesn't get posted.
+    week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
+    fresh = {k for k, v in todo if v.get("_date", "9999") >= week}
     seen |= {k for k, _ in (new if first else done)}  # a first run never retries or posts the backlog
     write(path, json.dumps(sorted(seen)))
     if not first:
         with queue_lock():
-            queue = load(qpath, []) + [{"id": r["id"], "key": k, "interest": r.get("interest"), "at": time.time()} for k, r in done]
+            queue = load(qpath, []) + [{"id": r["id"], "key": k, "interest": r.get("interest"), "at": time.time()} for k, r in done if k in fresh]
             write(qpath, json.dumps(queue))
     with lock:
         build_site()
