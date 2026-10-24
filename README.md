@@ -6,7 +6,7 @@ PlainGov watches Congress and all 50 state legislatures, rewrites new bills and 
 
 - **Congress:** [Congress.gov API](https://api.congress.gov) bill summaries
 - **States:** each legislature's own website, scraped about daily with [Open States' open-source scrapers](https://github.com/openstates/openstates-scrapers): bills that passed a chamber, passed the legislature, became law, or were vetoed
-- **AI:** where a legislature words a milestone in a way its scraper doesn't recognize ("Act No. 245", "Returned by Governor without approval"), Claude reads the bill's history to tell whether it passed, became law, or was vetoed (Haiku first, Sonnet confirms); Claude rewrites each update in plain English from the official record; [jev](https://typesafe.ai) scores how interesting it is, and only the best few per day get posted
+- **AI:** where a legislature words a milestone in a way its scraper doesn't recognize ("Act No. 245", "Returned by Governor without approval"), GPT 6 Luna reads the history of recently active bills to tell whether each passed, became law, or was vetoed; Claude rewrites each update in plain English from the official record; [jev](https://typesafe.ai) scores how interesting it is, and only the best few per day get posted
 
 ## How it works
 
@@ -37,7 +37,7 @@ Environment (`~/plaingov.env` on the VM, never committed):
 | `ALERT_EMAIL` | where scraper alerts go (exe.dev only emails the VM owner) |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | @plaingov's OAuth 1.0a keys (read+write) |
 | `DRY_RUN` | `1` (default) prints posts instead of sending |
-| `MAX_POSTS_PER_DAY`, `MIN_INTEREST`, `BACKFILL_DAYS`, `PARALLEL`, `RESCRAPE_HOURS`, `SITE_URL`, `LLM_MODEL`, `JEV_MODEL`, `DATA_DIR` | optional overrides |
+| `MAX_POSTS_PER_DAY`, `MIN_INTEREST`, `BACKFILL_DAYS`, `PARALLEL`, `RESCRAPE_HOURS`, `SITE_URL`, `LLM_MODEL`, `STAGE_MODEL`, `JEV_MODEL`, `DATA_DIR` | optional overrides |
 
 ## Monitoring
 

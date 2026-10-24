@@ -1,6 +1,6 @@
-import json, os, tempfile
+import json, os, tempfile, time
 import plaingov
-from plaingov import action_key, ai_stages, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
+from plaingov import ai_stages, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
 
 rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": "S. 4618", "resolution": False,
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
@@ -39,7 +39,6 @@ assert bill_stage({"actions": both + [act("2026-03-05", ["executive-signature"],
 assert bill_stage({"actions": [act("2026-02-01T00:00:00", ["passage"], '~{"classification": "legislature"}')]})[0] == 3  # Nebraska
 # The AI's reading of a bill's whole history (ai_stages) wins when it differs; agreeing keeps the classified date.
 sc_law = {**act("2026-06-04", [], '~{"classification": "legislature"}'), "description": "Act No. 245"}
-assert action_key(sc_law) == "legislature|Act No. #"
 h1 = {"legislative_session": "2025-2026", "identifier": "H 1", "actions": both + [sc_law]}
 assert stage_of(h1, {}) == (3, None, "2026-03-01")
 assert stage_of(h1, {"2025-2026|H 1": [4, None, "2026-06-04"]}) == (4, None, "2026-06-04")
@@ -89,32 +88,28 @@ try:
     raise AssertionError("matched bills across sessions")
 except RuntimeError:
     pass
-# ai_stages: hints flag unclassified wordings; Claude reads bills with a milestone or a flagged action, and Sonnet
-# decides only where Haiku disagrees with the classified stage. Cached.
+# ai_stages: the stage model reads recently active bills short of law (cached); old and law bills are skipped.
+today = time.strftime("%Y-%m-%d")
+recent = [act(today, ["passage"], UP), act(today, ["passage"], LOW), {**sc_law, "date": today}]
 os.makedirs(f"{plaingov.DATA}/scrape/vt/vt")
-json.dump({"legislative_session": "2025-2026", "identifier": "H 1", "title": "Budget", "classification": ["bill"], "actions": both + [sc_law]},
-          open(f"{plaingov.DATA}/scrape/vt/vt/bill_1.json", "w"))
-json.dump({"legislative_session": "2025-2026", "identifier": "H 2", "title": "Roads", "classification": ["bill"],
-           "actions": both + [{**sc_law, "description": "Debate adjourned"}]}, open(f"{plaingov.DATA}/scrape/vt/vt/bill_2.json", "w"))
+for i, (ident, acts) in enumerate([("H 1", recent), ("H 2", both + [sc_law]), ("H 3", recent + [act(today, ["executive-signature"], GOV)])]):
+    json.dump({"legislative_session": "2025-2026", "identifier": ident, "title": "T", "classification": ["bill"], "actions": acts},
+              open(f"{plaingov.DATA}/scrape/vt/vt/bill_{i}.json", "w"))
 asked = []
 def fake(url, data, *a):
     req = json.loads(data)
-    prompt = req["messages"][0]["content"]
-    asked.append((req["model"], prompt))
-    reply = ('{"1": "maybe", "2": "no"}' if "Mark each" in prompt else '{"status": "law", "date": "2026-06-04"}' if "bill H 1 " in prompt
-             else '{"status": "passed both chambers", "date": "2026-03-01"}')
-    return json.dumps({"content": [{"type": "text", "text": reply}]})
+    asked.append((req["model"], req["messages"][0]["content"]))
+    return json.dumps({"choices": [{"message": {"content": f'{{"status": "law", "chamber": "", "date": "{today}"}}'}, "finish_reason": "stop"}]})
 plaingov.fetch = fake
 ai = ai_stages("VT")
-assert ai == {"2025-2026|H 1": [4, None, "2026-06-04"], "2025-2026|H 2": [3, None, "2026-03-01"]}, ai
-assert sorted(m for m, _ in asked) == ["claude-haiku-5-5"] * 3 + ["claude-sonnet-5-5"], asked  # hints, 2 reads, 1 confirmation
-assert "1. legislature | Act No. #\n2. legislature | Debate adjourned" in asked[0][1], asked
+assert ai == {"2025-2026|H 1": [4, None, today]}, ai  # H 2 is old news, H 3 is already law
+assert [m for m, _ in asked] == ["gpt-6-luna"] and "bill H 1 " in asked[0][1] and "Act No. 245" in asked[0][1], asked
 asked.clear()
 assert ai_stages("VT") == ai and not asked  # cached
 # An answer without a usable date isn't "no milestone": the classified stage stays and it's asked again next scrape.
-plaingov.fetch = lambda url, data, *a: json.dumps({"content": [{"type": "text", "text": '{"status": "vetoed"}'}]})
+plaingov.fetch = lambda url, data, *a: json.dumps({"choices": [{"message": {"content": '{"status": "vetoed", "chamber": ""}'}}]})
 try:
-    plaingov.judge_stage("VT", json.load(open(f"{plaingov.DATA}/scrape/vt/vt/bill_2.json")))
+    plaingov.judge_stage("VT", json.load(open(f"{plaingov.DATA}/scrape/vt/vt/bill_0.json")))
     raise AssertionError("dateless answer accepted")
 except ValueError:
     pass
