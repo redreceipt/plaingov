@@ -542,12 +542,13 @@ Reply with only a JSON object mapping each number to "maybe" or "no".
 STAGE_PROMPT = """Here is the official action history of {where} bill {identifier} ("{title}"), oldest first, as "date | chamber | action".
 How far has this bill itself gotten? Be strict: say a milestone only if an action clearly shows it.
 - Passing a chamber means that whole chamber's final vote approving this bill (usually third reading). Not: committee votes or reports, "reported", placed on a calendar or general order, first or second readings, ordered to a reading, substitutions, or failed votes.
+- In a one-chamber legislature (like Nebraska's), its final passage counts as "passed both chambers".
 - Passing both chambers means both approved the same final version, so it goes to the Governor. If they passed different versions and still have to agree (like a conference committee), it has passed one chamber: the first one that passed it.
 - Law means this bill was signed, became law without a signature, got an act or chapter number, or had a veto overridden. Sent or delivered to the Governor isn't law yet. A line-item or partial veto doesn't stop a signed bill from being law.
 - Actions about a companion or substitute bill (like "Comp. became Pub. Ch. 157" or "Companion House Bill substituted"; "Comp." means companion) are about that other bill, which has its own page: they don't move this bill forward.
 - A resolution adopted by both chambers is "passed both chambers", not "law".
 - Vetoed means the Governor rejected the whole bill and lawmakers didn't override it (including when an override vote failed or the veto was sustained).
-Reply with only JSON: {{"status": "none", "passed one chamber", "passed both chambers", "law", or "vetoed", "chamber": "upper" or "lower" (for "passed one chamber"), "date": "YYYY-MM-DD" of the action that got it there}}
+Reply with only JSON, always including the date unless the status is "none": {{"status": "none", "passed one chamber", "passed both chambers", "law", or "vetoed", "chamber": "upper" or "lower" (for "passed one chamber"), "date": "YYYY-MM-DD" of the action that got it there}}
 
 {lines}"""
 STATUSES = {"passed one chamber": 2, "passed both chambers": 3, "law": 4, "vetoed": 5}
@@ -584,8 +585,10 @@ def judge_stage(st, b, model=LLM_MODEL):
     out = ask_json(STAGE_PROMPT.format(where=STATES[st], identifier=b["identifier"], title=b["title"][:300], lines="\n".join(
         f"{a['date'][:10]} | {org(a.get('organization_id')) or '-'} | {a['description'][:300]}" for a in acts)), 1000, model)
     status, day = STATUSES.get(out.get("status")), str(out.get("date", ""))
-    if not status or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or not acts[0]["date"][:10] <= day <= acts[-1]["date"][:10]:
+    if out.get("status") == "none":
         return None
+    if not status or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or not acts[0]["date"][:10] <= day <= acts[-1]["date"][:10]:
+        raise ValueError(f"unclear answer: {out}")  # not "none": keep the classified stage, ask again next scrape
     return [status, out.get("chamber") if status == 2 and out.get("chamber") in ("upper", "lower") else None, day]
 
 

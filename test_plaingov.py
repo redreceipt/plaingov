@@ -111,5 +111,12 @@ assert sorted(m for m, _ in asked) == ["claude-haiku-5-5"] * 3 + ["claude-sonnet
 assert "1. legislature | Act No. #\n2. legislature | Debate adjourned" in asked[0][1], asked
 asked.clear()
 assert ai_stages("VT") == ai and not asked  # cached
+# An answer without a usable date isn't "no milestone": the classified stage stays and it's asked again next scrape.
+plaingov.fetch = lambda url, data, *a: json.dumps({"content": [{"type": "text", "text": '{"status": "vetoed"}'}]})
+try:
+    plaingov.judge_stage("VT", json.load(open(f"{plaingov.DATA}/scrape/vt/vt/bill_2.json")))
+    raise AssertionError("dateless answer accepted")
+except ValueError:
+    pass
 assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})
 print("ok")
