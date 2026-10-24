@@ -248,15 +248,21 @@ def state_items(st, ai={}):
             yield f"{st}-{b['legislative_session']}-{b['identifier']}-{s[0]}", {**b, "state": st, "status": s, "_date": s[2]}
 
 
+forbidden = {}  # host -> when it answered 403 (CA's leginfo blocks every non-browser client); skipped for a day
+
+
 def bill_text(b):
     """Text of the newest version we can read (HTML first, then PDF), for richer rewrites."""
     for v in sorted(b["versions"], key=lambda v: v.get("date") or "", reverse=True):
         for link in sorted(v["links"], key=lambda l: l.get("media_type") != "text/html"):
-            if link.get("media_type") in ("text/html", "application/pdf"):
+            host = urllib.parse.urlparse(link["url"]).netloc
+            if link.get("media_type") in ("text/html", "application/pdf") and time.time() - forbidden.get(host, 0) > 86400:
                 try:
                     if len(text := doc_text(link["url"])) > 200:
                         return text
                 except Exception as ex:
+                    if getattr(ex, "code", None) == 403:
+                        forbidden[host] = time.time()
                     print(f"bill text {link['url']}: {ex!r}", file=sys.stderr, flush=True)
     return ""
 
@@ -587,8 +593,9 @@ Latest official actions:
 Source: {source}"""
 
 CHECK_PROMPT = """Check this plain-English explanation of a bill against its official source and actions. Reply with only JSON: {{"vague": true or false, "unsupported": ["..."]}}
+Status: {status}
 - vague: true only if it stays at the level of the topic (names the subject, or uses placeholders like "certain places" or "a safety device") when the source says what the bill actually requires, allows, or covers. Leaving out some details is fine.
-- unsupported: each claim that the source or actions don't support, including overstated legal effects. Plain rewording is fine. [] if none.
+- unsupported: each claim that the source or actions don't support, including overstated legal effects, and wording that doesn't match the status (a law described with "would", or a proposal described as if it were law). Plain rewording is fine. [] if none.
 
 Official actions:
 {actions}
@@ -627,7 +634,7 @@ def rewrite(rec):
         if not all(out.get(k) for k in ("headline", "tweet", "summary")):
             problems.append("headline, tweet, and summary are required.")
         if not problems:
-            check = ask_json(CHECK_PROMPT.format(actions=actions, source=rec["source"], rewrite=json.dumps(out)), 6000, STAGE_MODEL)
+            check = ask_json(CHECK_PROMPT.format(status=rec["stage"]["now"], actions=actions, source=rec["source"], rewrite=json.dumps(out)), 6000, STAGE_MODEL)
             problems = [f"Unsupported: {c}" for c in check.get("unsupported") or []]
             if check.get("vague") and not out.get("limited"):
                 problems.append("Too vague: say what the bill actually requires, allows, or covers, using the source's specifics.")
