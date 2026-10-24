@@ -1,4 +1,4 @@
-import json, os, tempfile, time
+import json, os, tempfile, time, urllib.error
 import plaingov
 from plaingov import ai_stages, posting_hours, report_text, doc_text, rewrite, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
 
@@ -124,6 +124,16 @@ except ValueError:
     pass
 # Bill text keeps what changed; scripts and styles are dropped.
 assert doc_text("data:text/html,<style>p{}</style><p>The fee is <s>$10</s> <u>$20</u>.<u> </u></p>") == "The fee is [removed: $10] [added: $20] .", doc_text("data:text/html,<p>x</p>")
+
+# A host that answers 403 is skipped for a day instead of on every version of every bill.
+seen_urls = []
+def forbid(url):
+    seen_urls.append(url)
+    raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+plaingov.doc_text, real_doc_text = forbid, plaingov.doc_text
+link = lambda n: {"date": f"2026-0{n}-01", "links": [{"media_type": "text/html", "url": f"https://blocked.example/{n}"}]}
+assert plaingov.bill_text({"versions": [link(1), link(2)]}) == "" and seen_urls == ["https://blocked.example/2"], seen_urls
+plaingov.doc_text = real_doc_text
 
 # rewrite: Claude writes, the stage model checks against the source, and Claude retries once with the problems.
 calls = []
