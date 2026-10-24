@@ -164,13 +164,11 @@ def action_key(a):
     return f"{org(a.get('organization_id'))}|{' '.join(re.sub(r'[0-9]+', '#', a['description']).split())[:200]}"
 
 
-def bill_stage(bill, labels={}):
-    """(status, chamber, date) of a bill's furthest milestone: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed.
-    Actions the scraper left unclassified use their AI label (label_actions), if any."""
+def bill_stage(bill):
+    """(status, chamber, date) of a bill's furthest milestone: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed."""
     passed, law, veto = {}, None, None
     for a in sorted(bill["actions"], key=lambda a: a["date"]):
-        kinds = set(a["classification"]) or {AI_KINDS.get(labels.get(action_key(a)), "")}
-        o, day = org(a.get("organization_id")), a["date"][:10]
+        kinds, o, day = set(a["classification"]), org(a.get("organization_id")), a["date"][:10]
         if "passage" in kinds and o in ("upper", "lower", "legislature"):
             passed.setdefault(o, day)
         law = day if kinds & LAW else law
@@ -201,11 +199,20 @@ def scraped(st):
     return glob.glob(f"{DATA}/scrape/{st.lower()}/**/bill_*.json", recursive=True)  # scrapers write <datadir>/<state>/
 
 
-def state_items(st, labels={}):
+RANK = {None: 0, 2: 1, 3: 2, 5: 3, 4: 4}  # how far a status got; a veto can still become law
+
+
+def stage_of(b, ai):
+    """The classified actions' stage, or the AI's reading of the whole history (ai_stages) when that got further."""
+    det, s = bill_stage(b), ai.get(f"{b['legislative_session']}|{b['identifier']}")
+    return tuple(s) if s and RANK[s[0]] > RANK[det and det[0]] else det
+
+
+def state_items(st, ai={}):
     """Milestones in a state's latest scrape."""
     for f in scraped(st):
         b = json.load(open(f))
-        s = bill_stage(b, labels) if set(b["classification"]) & BILLS else None
+        s = stage_of(b, ai) if set(b["classification"]) & BILLS else None
         if s:
             yield f"{st}-{b['legislative_session']}-{b['identifier']}-{s[0]}", {**b, "state": st, "status": s, "_date": s[2]}
 
@@ -296,13 +303,13 @@ def bill_num(n):
     return re.sub(r"^([A-Z]+)0*(?=\d)", r"\1", re.sub(r"[^A-Z0-9]", "", n.upper()))
 
 
-def save_ids(st, labels={}):
+def save_ids(st, ai={}):
     """Bill number -> [session, identifier, status] from a good scrape's main session, for a LegiScan backup later."""
     rows = []
     for f in scraped(st):
         b = json.load(open(f))
         if set(b["classification"]) & BILLS:
-            s = bill_stage(b, labels)
+            s = stage_of(b, ai)
             rows.append((b["legislative_session"], b["identifier"], s[0] if s else 0, max((a["date"][:4] for a in b["actions"]), default="0")))
     # shortcut: only the session with the most bills; special-session bills (numbers can repeat) aren't backed up
     sessions = [r[0] for r in rows]
@@ -418,9 +425,9 @@ def scrape_state(st):
     status = "failed" if error else "ok"
     stats = {}
     if status == "ok":
-        labels = label_actions(st)
-        new, done, failed = process(f"states-{st.lower()}", state_items(st, labels), state_update)
-        save_ids(st, labels)
+        ai = ai_stages(st)
+        new, done, failed = process(f"states-{st.lower()}", state_items(st, ai), state_update)
+        save_ids(st, ai)
         stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed, "backup": ""}
     h = set_health(st, status=status, error=error[-800:], last_end=time.time(), site=site, **stats)
     if status == "failed" and prev.get("status") != "failed":
@@ -514,52 +521,93 @@ def claude(prompt, max_tokens):
 
 
 def rewrite(rec):
-    text, stop = claude(PROMPT.format(**rec, status=rec["stage"]["now"] + (
+    out = {k: " ".join(str(v).split()) for k, v in ask_json(PROMPT.format(**rec, status=rec["stage"]["now"] + (
         " This IS law now: use present tense everywhere and never say 'would'." if rec["stage"]["step"] == 3
-        else " This is NOT law yet: say what it would do.")), 600)
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        raise ValueError(f"no JSON from LLM (stop_reason={stop}): {text[:200]!r}")
-    out = {k: " ".join(str(v).split()) for k, v in json.loads(m.group(0)).items()}
+        else " This is NOT law yet: say what it would do.")), 600).items()}
     if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out["summary"] + out["tweet"], re.I):
         raise ValueError(f"rewrite talks about its source: {out['summary'][:200]!r}")
     return {k: out[k] for k in ("headline", "tweet", "summary")}
 
 
-AI_KINDS = {"law": "became-law", "veto": "executive-veto", "passed": "passage"}  # AI label -> Open States classification
-ACTIONS_PROMPT = """These are actions on bills from the {where} legislature's website, one per line as "number. chamber | action" (# stands for any number).
-Label each one:
-- law: the bill became law (signed by the Governor, given an act or chapter number, became law without a signature, veto overridden)
-- veto: the Governor rejected it (vetoed, returned without approval)
-- passed: the whole chamber approved the bill on its final vote
-- other: anything else (committee steps, readings, amendments, scheduling, sent or delivered to the Governor), or if you're not sure
-Reply with only a JSON object mapping each number to its label.
+HINT_PROMPT = """These are actions on bills from the {where} legislature's website, one per line as "number. chamber | action" (# stands for any number).
+Mark each "maybe" if it might mean a bill passed a full chamber, became law, or was vetoed, and "no" otherwise. When unsure, say "maybe": these are only hints, checked later against the bill's whole history.
+Reply with only a JSON object mapping each number to "maybe" or "no".
 
 {lines}"""
 
+STAGE_PROMPT = """Here is the official action history of {where} bill {identifier} ("{title}"), oldest first, as "date | chamber | action".
+How far has this bill itself gotten? Only actions on this bill count, not ones about a companion or other bill. Failed votes, committee votes and reports, and readings aren't passing. Being sent or delivered to the Governor isn't law yet. A line-item veto doesn't stop a bill from becoming law. A veto that lawmakers overrode means it became law.
+Reply with only JSON: {{"status": "none", "passed one chamber", "passed both chambers", "law", or "vetoed", "chamber": "upper" or "lower" (for "passed one chamber"), "date": "YYYY-MM-DD" of the action that got it there}}
 
-def label_actions(st):
-    """AI labels for the actions a state's scraper left unclassified. Each legislature words things its own way, and sites
-    change, so this catches laws and vetoes no fixed list would. Cached per wording; only new wordings are asked."""
+{lines}"""
+STATUSES = {"passed one chamber": 2, "passed both chambers": 3, "law": 4, "vetoed": 5}
+
+
+def ask_json(prompt, max_tokens):
+    text, stop = claude(prompt, max_tokens)
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise ValueError(f"no JSON from LLM (stop_reason={stop}): {text[:200]!r}")
+    return json.loads(m.group(0))
+
+
+def label_actions(st, bills):
+    """Hints: does each wording a state's scraper left unclassified maybe mean a milestone? Cached, so each is asked once."""
     path = f"{DATA}/state/actions-{st.lower()}.json"
     labels = load(path, {})
-    todo = set()
-    for f in scraped(st):
-        b = json.load(open(f))
-        if set(b["classification"]) & BILLS:
-            todo |= {action_key(a) for a in b["actions"] if not a["classification"]}
-    todo = sorted(todo - labels.keys())
+    todo = sorted({action_key(a) for b in bills for a in b["actions"] if not a["classification"]} - labels.keys())
     for i in range(0, len(todo), 150):
         batch = todo[i:i + 150]
         try:
-            text, stop = claude(ACTIONS_PROMPT.format(where=STATES[st], lines="\n".join(f"{n}. {k.replace('|', ' | ', 1)}" for n, k in enumerate(batch, 1))), 4000)
-            out = json.loads(re.search(r"\{.*\}", text, re.S).group(0))
-        except Exception as ex:  # unlabeled wordings are asked again next scrape; classified actions still work meanwhile
-            print(f"{st}: labeling actions failed: {ex!r}", file=sys.stderr, flush=True)
+            out = ask_json(HINT_PROMPT.format(where=STATES[st], lines="\n".join(f"{n}. {k.replace('|', ' | ', 1)}" for n, k in enumerate(batch, 1))), 4000)
+        except Exception as ex:  # asked again next scrape
+            print(f"{st}: action hints failed: {ex!r}", file=sys.stderr, flush=True)
             break
-        labels.update({batch[int(n) - 1]: v if v in AI_KINDS else "other" for n, v in out.items() if str(n).isdigit() and 0 < int(n) <= len(batch)})
+        labels.update({batch[int(n) - 1]: v for n, v in out.items() if str(n).isdigit() and 0 < int(n) <= len(batch)})
         write(path, json.dumps(labels, indent=0))
     return labels
+
+
+def judge_stage(st, b):
+    """Claude reads a bill's whole history: [status, chamber, date], or None if no milestone."""
+    acts = sorted(b["actions"], key=lambda a: a["date"])[-80:]
+    out = ask_json(STAGE_PROMPT.format(where=STATES[st], identifier=b["identifier"], title=b["title"][:300], lines="\n".join(
+        f"{a['date'][:10]} | {org(a.get('organization_id')) or '-'} | {a['description'][:300]}" for a in acts)), 200)
+    status, day = STATUSES.get(out.get("status")), str(out.get("date", ""))
+    if not status or day not in {a["date"][:10] for a in acts}:
+        return None
+    return [status, out.get("chamber") if status == 2 and out.get("chamber") in ("upper", "lower") else None, day]
+
+
+def ai_stages(st):
+    """State sites word laws and vetoes their own way, and sites change, so some milestones reach us unclassified
+    (SC "Act No. 245", NE "Returned by Governor without approval"). When a bill not yet law has unclassified actions
+    after its last known milestone that might matter (label_actions), Claude reads its whole history. Cached until its
+    actions change. Returns {"session|identifier": [status, chamber, date] or None}."""
+    path = f"{DATA}/state/stages-{st.lower()}.json"
+    cache = load(path, {})
+    bills = [b for b in (json.load(open(f)) for f in scraped(st)) if set(b["classification"]) & BILLS]
+    labels = label_actions(st, bills)
+    todo = []
+    for b in bills:
+        det = bill_stage(b)
+        if det and det[0] == 4:
+            continue
+        if any(not a["classification"] and a["date"][:10] >= (det[2] if det else "") and labels.get(action_key(a)) == "maybe" for a in b["actions"]):
+            key, h = f"{b['legislative_session']}|{b['identifier']}", hashlib.sha1(json.dumps(b["actions"], sort_keys=True).encode()).hexdigest()[:12]
+            if cache.get(key, {}).get("h") != h:
+                todo.append((key, h, b))
+
+    def one(t):
+        try:
+            return t[0], {"h": t[1], "s": judge_stage(st, t[2])}
+        except Exception as ex:  # asked again next scrape
+            print(f"{st} {t[0]}: stage check failed: {ex!r}", file=sys.stderr, flush=True)
+
+    with ThreadPoolExecutor(6) as pool:
+        cache.update(d for d in pool.map(one, todo) if d)
+    write(path, json.dumps(cache, indent=0))
+    return {k: v["s"] for k, v in cache.items()}
 
 
 INTEREST = {"type": "score", "instructions": "How interesting would a typical American find this government update in their social feed?",
@@ -843,7 +891,7 @@ def rebuild():
     health = load(HEALTH, {})
     for st in STATES:
         if health.get(st, {}).get("status") == "ok" and scraped(st):
-            process(f"states-{st.lower()}", state_items(st, label_actions(st)), state_update)
+            process(f"states-{st.lower()}", state_items(st, ai_stages(st)), state_update)
 
 
 def serve():

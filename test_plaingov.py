@@ -1,6 +1,6 @@
 import json, os, tempfile
 import plaingov
-from plaingov import action_key, label_actions, legiscan_items, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
+from plaingov import action_key, ai_stages, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
 
 rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": "S. 4618", "resolution": False,
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
@@ -37,12 +37,15 @@ assert bill_stage({"actions": both}) == (3, None, "2026-03-01")
 assert bill_stage({"actions": both + [act("2026-03-09", ["executive-veto"], GOV)]}) == (5, None, "2026-03-09")
 assert bill_stage({"actions": both + [act("2026-03-05", ["executive-signature"], GOV)]}) == (4, None, "2026-03-05")
 assert bill_stage({"actions": [act("2026-02-01T00:00:00", ["passage"], '~{"classification": "legislature"}')]})[0] == 3  # Nebraska
-# Actions the scraper left unclassified (e.g. SC's "Act No. 245") count through their AI label.
+# The AI's reading of a bill's history (ai_stages) only counts when it got further; a veto can still become law.
 sc_law = {**act("2026-06-04", [], '~{"classification": "legislature"}'), "description": "Act No. 245"}
 assert action_key(sc_law) == "legislature|Act No. #"
-assert bill_stage({"actions": both + [sc_law]}) == (3, None, "2026-03-01")
-assert bill_stage({"actions": both + [sc_law]}, {"legislature|Act No. #": "law"}) == (4, None, "2026-06-04")
-assert bill_stage({"actions": both + [sc_law]}, {"legislature|Act No. #": "other"}) == (3, None, "2026-03-01")
+h1 = {"legislative_session": "2025-2026", "identifier": "H 1", "actions": both + [sc_law]}
+assert stage_of(h1, {}) == (3, None, "2026-03-01")
+assert stage_of(h1, {"2025-2026|H 1": [4, None, "2026-06-04"]}) == (4, None, "2026-06-04")
+assert stage_of(h1, {"2025-2026|H 1": [2, "lower", "2026-02-01"]}) == (3, None, "2026-03-01")
+vetoed = {**h1, "actions": both + [act("2026-03-09", ["executive-veto"], GOV)]}
+assert stage_of(vetoed, {"2025-2026|H 1": [4, None, "2026-04-01"]})[0] == 4 and stage_of({**vetoed, "actions": both + [act("2026-03-05", ["executive-signature"], GOV)]}, {"2025-2026|H 1": [5, None, "2026-04-01"]})[0] == 4
 
 assert state_stage("CA", 2, "upper")["next"] == "Now the Assembly has to say yes too."
 assert state_stage("TX", 2, "lower")["short"] == "Passed the House"
@@ -86,19 +89,22 @@ try:
     raise AssertionError("matched bills across sessions")
 except RuntimeError:
     pass
-# label_actions asks Claude only about new wordings, keeps known labels, and treats unknown replies as "other".
-json.dump({"legislature|Act No. #": "law"}, open(f"{plaingov.DATA}/state/actions-sc.json", "w"))
-json.dump({"legislative_session": "2025-2026", "identifier": "H 1", "classification": ["bill"], "actions": [
-    sc_law, {**sc_law, "description": "Debate adjourned"}, {**sc_law, "description": "Sent to the moon"}, act("2026-01-01", ["passage"], LOW)]},
-    open(f"{plaingov.DATA}/scrape/sc/sc/bill_9.json", "w"))
+# ai_stages: hints pick bills whose unclassified actions might matter; Claude reads those bills' histories once (cached).
+json.dump({"legislative_session": "2025-2026", "identifier": "H 1", "title": "Budget", "classification": ["bill"], "actions": both + [sc_law]},
+          open(f"{plaingov.DATA}/scrape/sc/sc/bill_9.json", "w"))
+json.dump({"legislative_session": "2025-2026", "identifier": "H 2", "title": "Roads", "classification": ["bill"],
+           "actions": both + [{**sc_law, "description": "Debate adjourned"}]}, open(f"{plaingov.DATA}/scrape/sc/sc/bill_10.json", "w"))
 asked = []
-plaingov.fetch = lambda url, data, *a: asked.append(json.loads(data)["messages"][0]["content"]) or json.dumps(
-    {"content": [{"type": "text", "text": '{"1": "other", "2": "maybe"}'}]})
-labels = label_actions("SC")
-assert len(asked) == 1 and "1. legislature | Debate adjourned\n2. legislature | Sent to the moon" in asked[0], asked
-assert labels == {"legislature|Act No. #": "law", "legislature|Debate adjourned": "other", "legislature|Sent to the moon": "other"}, labels
+def fake(url, data, *a):
+    prompt = json.loads(data)["messages"][0]["content"]
+    asked.append(prompt)
+    reply = ('{"1": "maybe", "2": "no"}' if "Mark each" in prompt else '{"status": "law", "date": "2026-06-04"}')
+    return json.dumps({"content": [{"type": "text", "text": reply}]})
+plaingov.fetch = fake
+ai = ai_stages("SC")
+assert ai == {"2025-2026|H 1": [4, None, "2026-06-04"]}, ai
+assert len(asked) == 2 and "1. legislature | Act No. #\n2. legislature | Debate adjourned" in asked[0] and "bill H 1" in asked[1], asked
 asked.clear()
-label_actions("SC")
-assert not asked  # cached
+assert ai_stages("SC") == ai and not asked  # cached
 assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})
 print("ok")
