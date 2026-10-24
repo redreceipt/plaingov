@@ -35,7 +35,7 @@ Environment (`~/plaingov.env` on the VM, never committed):
 |---|---|
 | `CONGRESS_API_KEY` | [api.data.gov key](https://api.congress.gov/sign-up/) |
 | `NEW_YORK_API_KEY`, `INDIANA_API_KEY`, `VA_API_KEY` | free keys some state scrapers need |
-| `LEGISCAN_API_KEY` | [LegiScan](https://legiscan.com/legiscan) key: sites that block us (IL, AK), states waiting on keys, and backup while a scraper fails |
+| `LEGISCAN_API_KEY` | [LegiScan](https://legiscan.com/legiscan) key: sites that block us (IL, AK, NH), states waiting on keys, and backup while a scraper fails |
 | `ALERT_EMAIL` | where scraper alerts go (exe.dev only emails the VM owner) |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | @plaingov's OAuth 1.0a keys (read+write) |
 | `DRY_RUN` | `1` (default) prints posts instead of sending |
