@@ -6,11 +6,11 @@ rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": 
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
        "sponsor": "Sen. Jane Doe (D-NH)", "date": "2026-05-21", "stage": us_stage("Introduced in Senate"), "milestone": False,
        "headline": "Funds counselors <b>in</b> schools", "tweet": "word " * 100, "summary": "Gives states grants.",
-       "updates": [{"date": "2026-05-21", "short": "Just proposed", "now": "A senator just proposed it."}]}
+       "updates": [{"date": "2026-05-21", "short": "Proposed", "now": "A senator proposed it."}]}
 
 # Non-milestone posts carry no link; milestone posts link to our page. Both stay within 280 (links count 23, "…" 2).
 t = tweet_text(rec)
-assert "http" not in t and t.endswith("…\n\nS. 4618 · Just proposed (May 21)\nFrom Sen. Jane Doe (D-NH)") and len(t) + 1 <= 280, t
+assert "http" not in t and t.endswith("…\n\nS. 4618 · Proposed (May 21)\nFrom Sen. Jane Doe (D-NH)") and len(t) + 1 <= 280, t
 assert tweet_text({**rec, "sponsor": None}).endswith("(May 21)"), "no sponsor line without a sponsor (LegiScan)"
 assert t.startswith("U.S. Congress: word word") and "Funds counselors" not in t, t  # one block, no headline
 url = "https://plaingov.com/us/119-s-4618/"
@@ -27,6 +27,11 @@ assert "<li class=done aria-current=step>Proposed</li>" in p and 'href="/us/"' i
 assert us_stage("Passed House")["short"] == "Passed the House"
 assert us_stage("Senate agreed to House amendment")["step"] == 2
 assert us_stage("Public Law")["short"] == "It's law"
+# Congress.gov's latest-action wording: one chamber passing says "agreed to" too.
+assert us_stage("Passed/agreed to in Senate: Passed Senate with an amendment by Unanimous Consent.")["short"] == "Passed the Senate"
+assert us_stage("Resolving differences -- House actions: On motion that the House agree to the Senate amendment Agreed to")["step"] == 2
+assert us_stage("Presented to President.")["short"] == "Passed Congress" and us_stage("Vetoed by President.")["short"] == "Vetoed"
+assert us_stage("Became Public Law No: 119-45.")["step"] == 3 and us_stage("Read twice and referred to the Committee on Finance.")["short"] == "Proposed"
 assert sponsor_name("Rep. Smith, John [R-TX-5]") == "Rep. John Smith (R-TX)"
 
 # State milestones come from Open States action classifications.
@@ -63,7 +68,7 @@ assert state_update({**SC_BILL, "state": "CA"})["sponsor"] == "Asm. Newton and 1
 
 law = {**rec, "id": "a", "stage": us_stage("Public Law")}
 html = by_stage([rec, law], False)
-assert html.index("New laws") < html.index("Just proposed"), html
+assert html.index("New laws") < html.index("Proposed"), html
 assert "Having trouble" in status_body({"SC": {"status": "failed"}}) and "Coming soon" in status_body({"CA": {"status": "needs setup"}})
 ls = legiscan_update({"state": "IL", "status": (2, "upper", "2026-03-01"), "number": "SB1234", "title": "Taxes", "description": "Taxes",
                      "url": "https://legiscan.com/IL/bill/SB1234/2025"})

@@ -95,18 +95,21 @@ def ordinal(n):
 
 
 def us_stage(desc):
+    """Stage from a Congress.gov action, like "Passed/agreed to in Senate: ..." or "Became Public Law No: 119-45."."""
     ch = "House" if "House" in desc else "Senate"
     other = "Senate" if ch == "House" else "House"
     if "Public Law" in desc:
         return stage(3, "It's law", "It's officially law now.")
-    if "agreed to" in desc:
+    if re.search(r"\bvetoed\b", desc, re.I):
+        return stage(2, "Vetoed", "The President said no (that's a veto).", "Congress can still make it law if two-thirds of the House and Senate vote to overrule the President.")
+    if re.search(r"Presented to President|Resolving differences|agreed? to (the )?(House|Senate) amendment", desc):
         return stage(2, "Passed Congress", "The House and Senate both said yes.", "Now it's up to the President to sign it or not.")
     if desc.startswith("Passed"):
         return stage(1, f"Passed the {ch}", f"The {ch} voted yes.", f"Now the {other} has to say yes too.")
     if desc.startswith("Reported"):
         return stage(0, f"Moving in the {ch}", f"A small group in the {ch} (a committee) looked it over and sent it on.", f"The whole {ch} might vote on it next.")
     who = "Someone in the House" if ch == "House" else "A senator"
-    return stage(0, "Just proposed", f"{who} just proposed it.", f"A small group in the {ch} (a committee) looks at it first. Heads up: most bills never make it past this step.")
+    return stage(0, "Proposed", f"{who} proposed it.", f"A small group in the {ch} (a committee) looks at it first. Heads up: most bills never make it past this step.")
 
 
 def sponsor_name(full):
@@ -116,31 +119,35 @@ def sponsor_name(full):
 
 
 def congress_items(days=3):
-    """Bill summaries published in the last `days`, oldest first."""
+    """Bills whose latest official action happened in the last week, from bills Congress.gov updated in the last `days`,
+    oldest first. CRS summaries usually arrive months after the action, so they're source material, not news."""
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days * 86400))
+    week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
     found, offset = [], 0
     while True:
-        batch = api("summaries", limit=250, offset=offset, sort="updateDate desc", fromDateTime=since)["summaries"]
+        batch = api("bill", limit=250, offset=offset, sort="updateDate desc", fromDateTime=since)["bills"]
         found += batch
         if len(batch) < 250:
             break
         offset += 250
-    for s in reversed(found):
-        b = s["bill"]
-        yield f"{b['congress']}-{b['type']}-{b['number']}-{s['versionCode']}", s
+    for b in reversed(found):
+        a = b.get("latestAction") or {}
+        if b["type"] in TYPES and a.get("actionDate", "") >= week:
+            yield f"{b['congress']}-{b['type']}-{b['number']}-{us_stage(a['text'])['short']}", {**b, "_date": a["actionDate"]}
 
 
-def congress_update(s):
-    b, t = s["bill"], s["bill"]["type"]
+def congress_update(b):
+    t, a = b["type"], b["latestAction"]
     label, slug = TYPES[t]
-    st = us_stage(s["actionDesc"])
+    st = us_stage(a["text"])
     if t in RESOLUTIONS and st["step"] > 0:
         st["next"] = ""
     path = f"bill/{b['congress']}/{t.lower()}/{b['number']}"
-    info = api(path)["bill"]
-    sponsors, last = info.get("sponsors") or [{}], info.get("latestAction") or {}
+    sponsors = api(path)["bill"].get("sponsors") or [{}]
+    summaries = api(f"{path}/summaries").get("summaries") or []
+    crs = strip(max(summaries, key=lambda x: x.get("updateDate", ""))["text"]) if summaries else ""
     text = ""
-    try:  # the bill's own text, besides CRS's summary
+    try:  # the bill's own text, besides CRS's summary when there is one
         url = next((f["url"] for v in api(f"{path}/text").get("textVersions", []) for f in v["formats"] if f["type"] == "Formatted Text"), None)
         text = doc_text(url) if url else ""
     except Exception as ex:
@@ -149,9 +156,9 @@ def congress_update(s):
         "id": f"us/{b['congress']}-{t.lower()}-{b['number']}", "where": "U.S. Congress", "state": None,
         "label": f"{label} {b['number']}", "resolution": t in RESOLUTIONS, "title": b["title"],
         "official_url": f"https://www.congress.gov/bill/{ordinal(b['congress'])}-congress/{slug}/{b['number']}",
-        "sponsor": sponsor_name(sponsors[0].get("fullName")), "date": s["actionDate"], "stage": st,
-        "milestone": st["step"] >= 1, "source": " ".join(x for x in (strip(s["text"]), text) if x)[:SOURCE_CHARS],
-        "actions": [f"{s['actionDate']}: {s['actionDesc']}"] + ([f"{last['actionDate']}: {last['text']}"] if last.get("text") else []),
+        "sponsor": sponsor_name(sponsors[0].get("fullName")), "date": a["actionDate"], "stage": st,
+        "milestone": st["step"] >= 1, "source": " ".join(x for x in (b["title"], crs, text) if x)[:SOURCE_CHARS],
+        "actions": [f"{a['actionDate']}: {a['text']}"],
     }
 
 
@@ -841,7 +848,7 @@ def by_stage(recs, where):
     """List page body: newest first within plain-language stage groups."""
     groups = [("New laws", lambda s: s["step"] == 3), ("Vetoed", lambda s: "eto" in s["short"]),
               ("Waiting on a signature", lambda s: s["step"] == 2), ("Halfway there", lambda s: s["step"] == 1),
-              ("Just proposed", lambda s: s["step"] == 0)]
+              ("Proposed", lambda s: s["step"] == 0)]
     out, left = "", recs
     for name, match in groups:
         hit = [r for r in left if match(r["stage"])]
@@ -994,9 +1001,7 @@ def refresh():
         rec = json.load(open(f))
         if rec.get("v") != PROMPT_VERSION:
             c, t, n = re.match(r"us/(\d+)-([a-z]+)-(\d+)$", rec["id"]).groups()
-            latest = max(api(f"bill/{c}/{t}/{n}/summaries").get("summaries") or [{}], key=lambda x: x.get("updateDate", ""))
-            if latest:
-                jobs.append((congress_update, {**latest, "bill": {"congress": int(c), "type": t.upper(), "number": n, "title": rec["title"]}}))
+            jobs.append((congress_update, api(f"bill/{c}/{t}/{n}")["bill"]))
 
     def one(job):
         try:

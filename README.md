@@ -4,7 +4,7 @@ What your government is doing, in plain English.
 
 PlainGov watches Congress and all 50 state legislatures, rewrites new bills and milestones without jargon, publishes a simple page for each bill at [plaingov.com](https://plaingov.com), and posts the most interesting ones to [@plaingov](https://x.com/plaingov).
 
-- **Congress:** [Congress.gov API](https://api.congress.gov) bill summaries
+- **Congress:** [Congress.gov API](https://api.congress.gov): bills whose latest official action happened this week, explained from the bill text and CRS's summary when there is one
 - **States:** each legislature's own website, scraped about daily with [Open States' open-source scrapers](https://github.com/openstates/openstates-scrapers): bills that passed a chamber, passed the legislature, became law, or were vetoed
 - **AI:** where a legislature words a milestone in a way its scraper doesn't recognize ("Act No. 245", "Returned by Governor without approval"), GPT 6 Luna reads the history of recently active bills to tell whether each passed, became law, or was vetoed; Claude rewrites each update in plain English from the official record; [jev](https://typesafe.ai) scores how interesting it is, and only the best few per day get posted
 
