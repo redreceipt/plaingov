@@ -18,6 +18,7 @@ python3 plaingov.py scrape     # daemon: scrape every state ~daily -> pages + po
 python3 plaingov.py scrape SC  # scrape one state now
 python3 plaingov.py post       # post the most interesting queued update to @plaingov
 python3 plaingov.py site       # rebuild the static site
+python3 plaingov.py refresh    # rewrite existing pages after a prompt change (PROMPT_VERSION)
 python3 test_plaingov.py       # self-check
 ```
 
@@ -48,6 +49,7 @@ After every state scrape, `health.json` records status, bill counts, and errors,
 ```
 git clone https://github.com/redreceipt/plaingov ~/plaingov
 sudo cp ~/plaingov/*.service ~/plaingov/*.timer /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo apt-get install -y poppler-utils   # pdftotext, for bills published as PDFs
 sudo usermod -aG docker exedev
 sudo systemctl enable --now plaingov-web plaingov-scrape plaingov@congress.timer plaingov@post.timer
 ```

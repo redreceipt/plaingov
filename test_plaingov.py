@@ -1,6 +1,6 @@
 import json, os, tempfile, time
 import plaingov
-from plaingov import ai_stages, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
+from plaingov import ai_stages, doc_text, rewrite, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
 
 rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": "S. 4618", "resolution": False,
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
@@ -113,5 +113,30 @@ try:
     raise AssertionError("dateless answer accepted")
 except ValueError:
     pass
+# Bill text keeps what changed; scripts and styles are dropped.
+assert doc_text("data:text/html,<style>p{}</style><p>The fee is <s>$10</s> <u>$20</u>.<u> </u></p>") == "The fee is [removed: $10] [added: $20] .", doc_text("data:text/html,<p>x</p>")
+
+# rewrite: Claude writes, the stage model checks against the source, and Claude retries once with the problems.
+calls = []
+def fake(url, data, *a):
+    req = json.loads(data)
+    calls.append((req["model"], req["messages"][0]["content"]))
+    if "claude" in req["model"]:  # first a vague answer, then a concrete one
+        out = {"headline": "Rules for certain places", "tweet": "t", "summary": "s", "details": "one", "changes": "", "effective": "", "happened": "h", "limited": False}
+        if len(calls) > 2:
+            out = {**out, "headline": "Hospitals and fire stations can take newborns", "details": ["Under 21 days old."]}
+        return json.dumps({"content": [{"type": "text", "text": json.dumps(out)}]})
+    verdict = {"vague": True, "unsupported": []} if len(calls) == 2 else {"vague": False, "unsupported": []}
+    return json.dumps({"choices": [{"message": {"content": json.dumps(verdict)}}]})
+plaingov.fetch = fake
+r = rewrite({**rec, "source": "Hospitals and fire stations may accept infants under 21 days old.", "actions": ["2026-09-09: Signed"]})
+assert r["headline"] == "Hospitals and fire stations can take newborns" and r["details"] == ["Under 21 days old."], r
+assert [m for m, _ in calls] == ["claude-haiku-5-5", "gpt-6-luna"] * 2 and "Too vague" in calls[2][1] and "2026-09-09: Signed" in calls[0][1], calls
+
+# Pages show the specifics, the official record, and say so when we only have a title.
+p = bill_page({**rec, "details": ["Under 21 days old."], "changes": "Adds drop boxes.", "effective": "September 10, 2026",
+               "happened": "The Governor signed it on September 9, 2026.", "actions": ["2026-09-09: SIGNED INTO LAW"], "limited": True})
+assert all(x in p for x in ("<h2>What it does</h2><ul><li>Under 21 days old.", "What changes", "September 10, 2026", "only have this bill's official title",
+                            "The Governor signed it on September 9, 2026.", "<li>2026-09-09: SIGNED INTO LAW</li>")), p
 assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})
 print("ok")
