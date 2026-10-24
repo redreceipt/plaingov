@@ -584,7 +584,7 @@ def judge_stage(st, b, model=LLM_MODEL):
     out = ask_json(STAGE_PROMPT.format(where=STATES[st], identifier=b["identifier"], title=b["title"][:300], lines="\n".join(
         f"{a['date'][:10]} | {org(a.get('organization_id')) or '-'} | {a['description'][:300]}" for a in acts)), 1000, model)
     status, day = STATUSES.get(out.get("status")), str(out.get("date", ""))
-    if not status or day not in {a["date"][:10] for a in acts}:
+    if not status or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or not acts[0]["date"][:10] <= day <= acts[-1]["date"][:10]:
         return None
     return [status, out.get("chamber") if status == 2 and out.get("chamber") in ("upper", "lower") else None, day]
 
