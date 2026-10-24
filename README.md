@@ -6,7 +6,7 @@ PlainGov watches Congress and all 50 state legislatures, rewrites new bills and 
 
 - **Congress:** [Congress.gov API](https://api.congress.gov) bill summaries
 - **States:** each legislature's own website, scraped about daily with [Open States' open-source scrapers](https://github.com/openstates/openstates-scrapers): bills that passed a chamber, passed the legislature, became law, or were vetoed
-- **AI:** Claude rewrites each update in plain English from the official record; [jev](https://typesafe.ai) scores how interesting it is, and only the best few per day get posted
+- **AI:** where a legislature words a milestone in a way its scraper doesn't recognize ("Act No. 245", "Returned by Governor without approval"), Claude reads the bill's history to tell whether it passed, became law, or was vetoed (Haiku first, Sonnet confirms); Claude rewrites each update in plain English from the official record; [jev](https://typesafe.ai) scores how interesting it is, and only the best few per day get posted
 
 ## How it works
 

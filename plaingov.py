@@ -818,7 +818,7 @@ or got vetoed. Then we explain each one in a few plain sentences, with a simple 
 for the states, using the open-source <a href="https://github.com/openstates/openstates-scrapers">Open States</a> scrapers. For a few states
 whose websites block automated visitors, and while a state's website is having trouble, we use <a href="https://legiscan.com">LegiScan</a> (CC BY 4.0). Every page links to the official bill.</p>
 <h2>How we use AI</h2>
-<p>AI (Anthropic's Claude) rewrites the official text in plain English. Another AI model (jev) helps us pick the stories most people would care
+<p>AI (Anthropic's Claude) rewrites the official text in plain English. Every legislature words things its own way, so AI also reads a bill's official history when it's unclear whether the bill passed, became law, or was vetoed. Another AI model (jev) helps us pick the stories most people would care
 about for <a href="https://x.com/plaingov">our X account</a>. AI can get things wrong or leave things out, so if a bill matters to you,
 check the official link. This isn't legal advice.</p>
 <h2>We don't take sides</h2>
