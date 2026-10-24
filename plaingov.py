@@ -831,10 +831,12 @@ def serve():
 # --- X ----------------------------------------------------------------------
 
 def tweet_text(r):
-    """One block (what changes, for whom), then bill, status, and date. The site keeps its headline + summary.
+    """One block (what changes, for whom), then bill, status, date, and sponsor. The site keeps its headline + summary.
+    Sponsors are named, never @mentioned: X bans automated mentions of people who haven't opted in (docs/x-engagement.md).
     Milestones (passed a chamber or further) link to the bill page; X charges much more for posts with links."""
     head = f"{r['where']}: "
     tail = f"{r['label']} · {r['stage']['short']} ({date(r['date'], '%b %-d' if r['date'][:4] == time.strftime('%Y') else '%b %-d, %Y')})"
+    tail += f"\nFrom {r['sponsor']}" if r.get("sponsor") else ""
     url = f"{SITE_URL}/{r['id']}/" if r["milestone"] else ""
     room = 280 - len(head) - len(tail) - 2 - (URL_LEN + 1 if url else 0)  # 2 = blank-line separator
     body = r["tweet"]
