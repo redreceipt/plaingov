@@ -44,7 +44,10 @@ def doc_text(url):
     """A bill version's text. PDFs go through pdftotext (poppler-utils); in HTML, changed text is marked
     [added: ...] / [removed: ...] so the rewrite can tell what's new."""
     with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=120) as r:
-        data, charset = r.read(), r.headers.get_content_charset()
+        return doc_bytes_text(r.read(), r.headers.get_content_charset())
+
+
+def doc_bytes_text(data, charset=None):
     if data[:5] == b"%PDF-":
         return " ".join(subprocess.run(["pdftotext", "-", "-"], input=data, capture_output=True, timeout=120, check=True).stdout.decode("utf-8", "replace").split())
     mark = lambda tag: lambda m: f" [{tag}: {m[2]}] " if strip(m[2]) else " "
@@ -389,8 +392,14 @@ def legiscan_update(b):
             try:
                 if len(text := doc_text(t["state_link"])) > 200:
                     break
-            except Exception as ex:
+            except Exception as ex:  # e.g. a legislature's broken certificate chain: use LegiScan's copy (one more query)
                 print(f"bill text {t.get('state_link')}: {ex!r}", file=sys.stderr, flush=True)
+                try:
+                    q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], "op": "getBillText", "id": t["doc_id"]})
+                    if len(text := doc_bytes_text(base64.b64decode(json.loads(fetch(f"https://api.legiscan.com/?{q}"))["text"]["doc"]))) > 200:
+                        break
+                except Exception as ex2:
+                    print(f"LegiScan text {t.get('doc_id')}: {ex2!r}", file=sys.stderr, flush=True)
             text = ""
     return {
         "id": legiscan_id(b), "where": STATES[st], "actions": actions,
@@ -547,6 +556,7 @@ Rules:
 - Say what's new versus what already existed when the source shows it. "[added: ...]" and "[removed: ...]" mark changed text, and "is amended to read" means existing law is being changed. Don't call something new if the bill only adjusts an existing rule.
 - Neutral and nonpartisan. No opinions, hype, slang, emojis, or hashtags.
 - Everyday words and short sentences, about an 8th-grade reading level. Explain any legal or technical term in a few plain words.
+- Action dates are when each action was recorded. If an action's text gives the real date (like "SIGNED INTO LAW 9/9"), use that one.
 - Match the status. If it's law, say what it does ("Hospitals now have to...") or when it starts if that's later ("Starting July 1, 2027, ..."). If it isn't law yet, say what it would do ("would", "if it passes").
 - If the source is only a title or a short description, say only what that tells you, keep it short, and set "limited" to true. Don't fill space.
 
@@ -590,14 +600,15 @@ def llm(prompt, max_tokens, model=LLM_MODEL):
 
 
 def rewrite(rec):
-    """Claude writes the page; STAGE_MODEL checks it against the source and Claude gets one retry with that feedback.
-    A rewrite that still fails raises, so the bill is tried again next run instead of publishing something vague or wrong."""
+    """Claude writes the page and STAGE_MODEL checks it against the source. Claude gets one retry with that feedback, then
+    STAGE_MODEL (more precise, less plain) a last one. A rewrite that still fails raises, so the bill is tried again next
+    run instead of publishing something vague or wrong."""
     actions = "\n".join(rec.get("actions") or [f"{rec['date']}: {rec['stage']['now']}"])
     prompt = PROMPT.format(**{**rec, "actions": actions, "status": rec["stage"]["now"] + (
         " This IS law now: use present tense, or say when it starts if that's later." if rec["stage"]["step"] == 3
         else " This is NOT law yet: say what it would do.")})
-    for attempt in (1, 2):
-        out = ask_json(prompt, 2000)
+    for model in (LLM_MODEL, LLM_MODEL, STAGE_MODEL):
+        out = ask_json(prompt, 6000, model)
         out = {k: [" ".join(str(x).split()) for x in (v if isinstance(v, list) else [v] if v else [])] if k == "details"
                else bool(v) if k == "limited" else " ".join(str(v).split()) for k, v in out.items() if k in REWRITE_KEYS}
         problems = []
@@ -613,7 +624,7 @@ def rewrite(rec):
         if not problems:
             return {k: out.get(k, [] if k == "details" else "") for k in REWRITE_KEYS}
         prompt += "\n\nYour last answer had these problems. Fix them and reply with the full JSON again:\n- " + "\n- ".join(problems)
-    raise ValueError(f"rewrite failed checks twice: {problems}")
+    raise ValueError(f"rewrite failed checks three times: {problems}")
 
 
 STAGE_PROMPT = """Here is the official action history of {where} bill {identifier} ("{title}"), oldest first, as "date | chamber | action".
