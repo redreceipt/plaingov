@@ -19,6 +19,7 @@ python3 plaingov.py scrape SC  # scrape one state now
 python3 plaingov.py post       # post the most interesting queued update to @plaingov
 python3 plaingov.py site       # rebuild the static site
 python3 plaingov.py refresh    # rewrite existing pages after a prompt change (PROMPT_VERSION)
+python3 plaingov.py report     # X engagement for the last 7 days (emailed weekly by the hourly post run)
 python3 test_plaingov.py       # self-check
 ```
 
