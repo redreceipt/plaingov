@@ -1,6 +1,6 @@
 import json, os, tempfile, time
 import plaingov
-from plaingov import ai_stages, doc_text, rewrite, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
+from plaingov import ai_stages, report_text, doc_text, rewrite, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
 
 rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": "S. 4618", "resolution": False,
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
@@ -138,5 +138,11 @@ p = bill_page({**rec, "details": ["Under 21 days old."], "changes": "Adds drop b
                "happened": "The Governor signed it on September 9, 2026.", "actions": ["2026-09-09: SIGNED INTO LAW"], "limited": True})
 assert all(x in p for x in ("<h2>What it does</h2><ul><li>Under 21 days old.", "What changes", "September 10, 2026", "only have this bill's official title",
                             "The Governor signed it on September 9, 2026.", "<li>2026-09-09: SIGNED INTO LAW</li>")), p
+# The weekly X report totals metrics and compares groups (e.g. link vs no link) by median.
+rows = [{"id": "1", "bill": "us/a", "stage": "It's law", "where": "federal", "link": True, "hours_et": "06-12", "impression_count": 100, "like_count": 3},
+        {"id": "2", "bill": "states/x", "stage": "Passed the Senate", "where": "state", "link": False, "hours_et": "18-24", "impression_count": 40}]
+t = report_text(rows)
+assert "2 posts. Totals: impression 140, like 3" in t and "link True (1): 100 / 3 / 0 / 0" in t and t.index("status/1") < t.index("status/2"), t
+assert report_text([]) == "No posts in the last 7 days."
 assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})
 print("ok")

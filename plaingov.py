@@ -6,11 +6,12 @@ Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post qu
        plaingov.py post       post the most interesting queued update to X (@plaingov)
        plaingov.py site       rebuild the site only
        plaingov.py refresh    rewrite existing pages from before the current prompt (PROMPT_VERSION)
+       plaingov.py report     X engagement for the last 7 days (the hourly post run sends it weekly)
 
 A feed's first run builds pages for what's already listed (states: last BACKFILL_DAYS) and queues no posts.
 DRY_RUN=1 (default) prints posts instead of sending them.
 """
-import base64, contextlib, fcntl, glob, hashlib, hmac, html, json, os, re, secrets, shutil, subprocess, sys, threading, time, urllib.parse, urllib.request
+import base64, contextlib, datetime, fcntl, glob, hashlib, hmac, html, json, os, re, secrets, shutil, statistics, subprocess, sys, threading, time, urllib.parse, urllib.request, zoneinfo
 from concurrent.futures import ThreadPoolExecutor
 
 DATA = os.environ.get("DATA_DIR", os.path.expanduser("~/plaingov-data"))
@@ -1054,24 +1055,79 @@ def tweet_text(r):
     return f"{head}{body}\n\n{tail}" + (f"\n{url}" if url else "")
 
 
-def post_x(text):
-    """POST /2/tweets as @plaingov with OAuth 1.0a user context (JSON bodies are not part of the signature)."""
+def x_api(method, url, params={}, body=None):
+    """X API v2 as @plaingov with OAuth 1.0a user context (query params are signed; JSON bodies are not)."""
     env = lambda k: os.environ[f"X_{k}"]
-    url = "https://api.x.com/2/tweets"
     q = lambda s: urllib.parse.quote(s, safe="")
     oauth = {"oauth_consumer_key": env("API_KEY"), "oauth_nonce": secrets.token_hex(16),
              "oauth_signature_method": "HMAC-SHA1", "oauth_timestamp": str(int(time.time())),
              "oauth_token": env("ACCESS_TOKEN"), "oauth_version": "1.0"}
-    base = "&".join(["POST", q(url), q("&".join(f"{q(k)}={q(v)}" for k, v in sorted(oauth.items())))])
+    base = "&".join([method, q(url), q("&".join(f"{q(k)}={q(v)}" for k, v in sorted({**oauth, **params}.items())))])
     key = f"{q(env('API_SECRET'))}&{q(env('ACCESS_SECRET'))}"
     oauth["oauth_signature"] = base64.b64encode(hmac.new(key.encode(), base.encode(), hashlib.sha1).digest()).decode()
     auth = "OAuth " + ", ".join(f'{q(k)}="{q(v)}"' for k, v in sorted(oauth.items()))
-    return json.loads(fetch(url, json.dumps({"text": text}).encode(), {"Authorization": auth, "Content-Type": "application/json"}))
+    full = url + ("?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote) if params else "")
+    return json.loads(fetch(full, None if body is None else json.dumps(body).encode(), {"Authorization": auth, "Content-Type": "application/json"}))
+
+
+def post_x(text):
+    return x_api("POST", "https://api.x.com/2/tweets", body={"text": text})
+
+
+METRICS = ["impression_count", "like_count", "reply_count", "retweet_count", "quote_count", "bookmark_count", "user_profile_clicks", "url_link_clicks"]
+
+
+def report_text(rows):
+    """Weekly summary: totals, medians by group, and the top posts."""
+    if not rows:
+        return "No posts in the last 7 days."
+    out = [f"{len(rows)} posts. Totals: " + ", ".join(f"{m.removesuffix('_count')} {sum(r.get(m, 0) for r in rows)}" for m in METRICS), "",
+           "Median impressions / likes / replies / profile clicks per post:"]
+    for group in ("stage", "where", "link", "hours_et"):
+        for value in sorted({str(r[group]) for r in rows}):
+            rs = [r for r in rows if str(r[group]) == value]
+            med = lambda m: statistics.median(r.get(m, 0) for r in rs)
+            out.append(f"  {group} {value} ({len(rs)}): {med('impression_count')} / {med('like_count')} / {med('reply_count')} / {med('user_profile_clicks')}")
+    out += ["", "Top posts:"] + [f"  {r.get('impression_count', 0)} impressions, {r.get('like_count', 0)} likes: {r['bill']} https://x.com/plaingov/status/{r['id']}"
+                                 for r in sorted(rows, key=lambda r: -r.get("impression_count", 0))[:3]]
+    return "\n".join(out)
+
+
+def report():
+    """Weekly X engagement for the last 7 days of posts, emailed with the alerts and kept in state/reports/ to compare
+    experiments against. Reading our own posts costs $0.001 each."""
+    path = f"{DATA}/state/x.json"
+    me = load(path, {}).get("id") or x_api("GET", "https://api.x.com/2/users/me")["data"]["id"]
+    write(path, json.dumps({"id": me}))
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7 * 86400))
+    tweets = x_api("GET", f"https://api.x.com/2/users/{me}/tweets", {"start_time": since, "max_results": "100",
+                   "tweet.fields": "created_at,public_metrics,non_public_metrics"}).get("data", [])
+    bills = {p["tweet"]: p["id"] for p in load(f"{DATA}/state/posts.json", [])}
+    rows = []
+    for t in tweets:
+        rec = load(f"{DATA}/bills/{bills.get(t['id'], '-')}.json", None) or {"stage": {}}
+        hour = datetime.datetime.fromisoformat(t["created_at"].replace("Z", "+00:00")).astimezone(zoneinfo.ZoneInfo("America/New_York")).hour
+        rows.append({"id": t["id"], "bill": bills.get(t["id"], "not ours"), "stage": rec["stage"].get("short", "?"),
+                     "where": "state" if rec.get("state") else "federal", "link": "t.co/" in t["text"],
+                     "hours_et": f"{hour // 6 * 6:02d}-{hour // 6 * 6 + 6:02d}", **t.get("public_metrics", {}), **t.get("non_public_metrics", {})})
+    day = time.strftime("%Y-%m-%d")
+    write(f"{DATA}/state/reports/{day}.json", json.dumps(rows, indent=1))
+    text = report_text(rows)
+    if DRY_RUN:
+        return print(text)
+    alert(f"PlainGov: X report for the week ending {day}", text)
+    flush_alerts()
 
 
 def post():
     with queue_lock():
         post_best()
+    reports = sorted(glob.glob(f"{DATA}/state/reports/*.json"))
+    if not reports or time.time() - os.path.getmtime(reports[-1]) > 7 * 86400 - 3600:  # weekly, from the hourly post timer
+        try:
+            report()
+        except Exception as ex:  # never let the report break posting
+            print(f"X report failed: {ex!r}", file=sys.stderr, flush=True)
 
 
 def post_best():
@@ -1151,4 +1207,4 @@ if __name__ == "__main__":
     cmd, arg = sys.argv[1], (sys.argv[2:] or [None])[0]
     if cmd == "congress":
         sys.exit(1 if process("congress", congress_items(), congress_update)[2] else 0)
-    {"site": build_site, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh}[cmd]()
+    {"site": build_site, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh, "report": report}[cmd]()
