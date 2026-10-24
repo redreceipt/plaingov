@@ -52,12 +52,14 @@ assert state_stage("CA", 2, "upper")["next"] == "Now the Assembly has to say yes
 assert state_stage("TX", 2, "lower")["short"] == "Passed the House"
 assert state_stage("SC", 5)["short"] == "Vetoed"
 
-s = state_update({"state": "SC", "status": (4, None, "2026-09-01"), "identifier": "H 3305", "legislative_session": "2025-2026",
+SC_BILL = {"state": "SC", "status": (4, None, "2026-09-01"), "identifier": "H 3305", "legislative_session": "2025-2026",
                   "title": "Supplemental Appropriations", "from_organization": LOW, "abstracts": [], "versions": [],
                   "sources": [{"url": "https://www.scstatehouse.gov/billsearch.php?billnumbers=3305"}],
                   "sponsorships": [{"name": "Newton", "primary": True, "entity_type": "person"},
-                                   {"name": "Bannister", "primary": True, "entity_type": "person"}]})
+                                   {"name": "Bannister", "primary": True, "entity_type": "person"}]}
+s = state_update(SC_BILL)
 assert (s["id"], s["label"], s["sponsor"], s["stage"]["short"]) == ("states/sc/2025-2026-h-3305", "H 3305", "Rep. Newton and 1 other", "It's law"), s
+assert state_update({**SC_BILL, "state": "CA"})["sponsor"] == "Asm. Newton and 1 other"  # lower chamber is the Assembly
 
 law = {**rec, "id": "a", "stage": us_stage("Public Law")}
 html = by_stage([rec, law], False)
