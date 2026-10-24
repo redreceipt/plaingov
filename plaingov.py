@@ -577,6 +577,7 @@ Rules:
 - Action dates are when each action was recorded. If an action's text gives the real date (like "SIGNED INTO LAW 9/9"), use that one.
 - Match the status. If it's law, say what it does ("Hospitals now have to...") or when it starts if that's later ("Starting July 1, 2027, ..."). If it isn't law yet, say what it would do ("would", "if it passes").
 - If the source is only a title or a short description, say only what that tells you, keep it short, and set "limited" to true. Don't fill space.
+- Never mention the source, the bill text, or what they leave out: write about the bill itself. When "limited" is true, the page tells readers we only have the title.
 
 Reply with only a JSON object with these keys:
 "headline": what changes for people, in 4-10 everyday words, sentence case, no period (max 70 characters). Like "Hospitals would have to give you an itemized bill"
