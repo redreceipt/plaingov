@@ -159,11 +159,18 @@ def org(org_id):
     return json.loads(org_id[1:]).get("classification", "") if (org_id or "").startswith("~{") else ""
 
 
-def bill_stage(bill):
-    """(status, chamber, date) of a bill's furthest milestone: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed."""
+def action_key(a):
+    """'lower|Act No. #': the same wording on any bill shares one AI label."""
+    return f"{org(a.get('organization_id'))}|{' '.join(re.sub(r'[0-9]+', '#', a['description']).split())[:200]}"
+
+
+def bill_stage(bill, labels={}):
+    """(status, chamber, date) of a bill's furthest milestone: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed.
+    Actions the scraper left unclassified use their AI label (label_actions), if any."""
     passed, law, veto = {}, None, None
     for a in sorted(bill["actions"], key=lambda a: a["date"]):
-        kinds, o, day = set(a["classification"]), org(a.get("organization_id")), a["date"][:10]
+        kinds = set(a["classification"]) or {AI_KINDS.get(labels.get(action_key(a)), "")}
+        o, day = org(a.get("organization_id")), a["date"][:10]
         if "passage" in kinds and o in ("upper", "lower", "legislature"):
             passed.setdefault(o, day)
         law = day if kinds & LAW else law
@@ -194,11 +201,11 @@ def scraped(st):
     return glob.glob(f"{DATA}/scrape/{st.lower()}/**/bill_*.json", recursive=True)  # scrapers write <datadir>/<state>/
 
 
-def state_items(st):
+def state_items(st, labels={}):
     """Milestones in a state's latest scrape."""
     for f in scraped(st):
         b = json.load(open(f))
-        s = bill_stage(b) if set(b["classification"]) & BILLS else None
+        s = bill_stage(b, labels) if set(b["classification"]) & BILLS else None
         if s:
             yield f"{st}-{b['legislative_session']}-{b['identifier']}-{s[0]}", {**b, "state": st, "status": s, "_date": s[2]}
 
@@ -289,13 +296,13 @@ def bill_num(n):
     return re.sub(r"^([A-Z]+)0*(?=\d)", r"\1", re.sub(r"[^A-Z0-9]", "", n.upper()))
 
 
-def save_ids(st):
+def save_ids(st, labels={}):
     """Bill number -> [session, identifier, status] from a good scrape's main session, for a LegiScan backup later."""
     rows = []
     for f in scraped(st):
         b = json.load(open(f))
         if set(b["classification"]) & BILLS:
-            s = bill_stage(b)
+            s = bill_stage(b, labels)
             rows.append((b["legislative_session"], b["identifier"], s[0] if s else 0, max((a["date"][:4] for a in b["actions"]), default="0")))
     # shortcut: only the session with the most bills; special-session bills (numbers can repeat) aren't backed up
     sessions = [r[0] for r in rows]
@@ -411,8 +418,9 @@ def scrape_state(st):
     status = "failed" if error else "ok"
     stats = {}
     if status == "ok":
-        new, done, failed = process(f"states-{st.lower()}", state_items(st), state_update)
-        save_ids(st)
+        labels = label_actions(st)
+        new, done, failed = process(f"states-{st.lower()}", state_items(st, labels), state_update)
+        save_ids(st, labels)
         stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed, "backup": ""}
     h = set_health(st, status=status, error=error[-800:], last_end=time.time(), site=site, **stats)
     if status == "failed" and prev.get("status") != "failed":
@@ -498,21 +506,60 @@ Status: {status}
 Source: {source}"""
 
 
+def claude(prompt, max_tokens):
+    """Claude via exe.dev's integration (it adds the API key): (reply text, stop reason)."""
+    body = json.dumps({"model": LLM_MODEL, "max_tokens": max_tokens, "thinking": {"type": "disabled"}, "messages": [{"role": "user", "content": prompt}]})
+    r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", body.encode(), {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
+    return "".join(c["text"] for c in r["content"] if c["type"] == "text"), r.get("stop_reason")
+
+
 def rewrite(rec):
-    body = json.dumps({"model": LLM_MODEL, "max_tokens": 600, "thinking": {"type": "disabled"},
-                       "messages": [{"role": "user", "content": PROMPT.format(**rec, status=rec["stage"]["now"] + (
-                           " This IS law now: use present tense everywhere and never say 'would'." if rec["stage"]["step"] == 3
-                           else " This is NOT law yet: say what it would do."))}]})
-    r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", body.encode(),
-                         {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
-    text = "".join(c["text"] for c in r["content"] if c["type"] == "text")
+    text, stop = claude(PROMPT.format(**rec, status=rec["stage"]["now"] + (
+        " This IS law now: use present tense everywhere and never say 'would'." if rec["stage"]["step"] == 3
+        else " This is NOT law yet: say what it would do.")), 600)
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
-        raise ValueError(f"no JSON from LLM (stop_reason={r.get('stop_reason')}): {text[:200]!r}")
+        raise ValueError(f"no JSON from LLM (stop_reason={stop}): {text[:200]!r}")
     out = {k: " ".join(str(v).split()) for k, v in json.loads(m.group(0)).items()}
     if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out["summary"] + out["tweet"], re.I):
         raise ValueError(f"rewrite talks about its source: {out['summary'][:200]!r}")
     return {k: out[k] for k in ("headline", "tweet", "summary")}
+
+
+AI_KINDS = {"law": "became-law", "veto": "executive-veto", "passed": "passage"}  # AI label -> Open States classification
+ACTIONS_PROMPT = """These are actions on bills from the {where} legislature's website, one per line as "number. chamber | action" (# stands for any number).
+Label each one:
+- law: the bill became law (signed by the Governor, given an act or chapter number, became law without a signature, veto overridden)
+- veto: the Governor rejected it (vetoed, returned without approval)
+- passed: the whole chamber approved the bill on its final vote
+- other: anything else (committee steps, readings, amendments, scheduling, sent or delivered to the Governor), or if you're not sure
+Reply with only a JSON object mapping each number to its label.
+
+{lines}"""
+
+
+def label_actions(st):
+    """AI labels for the actions a state's scraper left unclassified. Each legislature words things its own way, and sites
+    change, so this catches laws and vetoes no fixed list would. Cached per wording; only new wordings are asked."""
+    path = f"{DATA}/state/actions-{st.lower()}.json"
+    labels = load(path, {})
+    todo = set()
+    for f in scraped(st):
+        b = json.load(open(f))
+        if set(b["classification"]) & BILLS:
+            todo |= {action_key(a) for a in b["actions"] if not a["classification"]}
+    todo = sorted(todo - labels.keys())
+    for i in range(0, len(todo), 150):
+        batch = todo[i:i + 150]
+        try:
+            text, stop = claude(ACTIONS_PROMPT.format(where=STATES[st], lines="\n".join(f"{n}. {k.replace('|', ' | ', 1)}" for n, k in enumerate(batch, 1))), 4000)
+            out = json.loads(re.search(r"\{.*\}", text, re.S).group(0))
+        except Exception as ex:  # unlabeled wordings are asked again next scrape; classified actions still work meanwhile
+            print(f"{st}: labeling actions failed: {ex!r}", file=sys.stderr, flush=True)
+            break
+        labels.update({batch[int(n) - 1]: v if v in AI_KINDS else "other" for n, v in out.items() if str(n).isdigit() and 0 < int(n) <= len(batch)})
+        write(path, json.dumps(labels, indent=0))
+    return labels
 
 
 INTEREST = {"type": "score", "instructions": "How interesting would a typical American find this government update in their social feed?",
@@ -532,9 +579,7 @@ def interest(rec):
             raise
     prompt = (f"{INTEREST['instructions']} Score 0-4: " + "; ".join(f"{i}={c}" for i, c in enumerate(INTEREST["criteria"]))
               + f". Reply with only the number.\n\n{json.dumps(body['state'])}")
-    r = json.loads(fetch("https://llm.int.exe.xyz/v1/messages", json.dumps({"model": LLM_MODEL, "max_tokens": 10, "thinking": {"type": "disabled"},
-                         "messages": [{"role": "user", "content": prompt}]}).encode(), {"content-type": "application/json", "anthropic-version": "2023-06-01"}))
-    return min(4.0, max(0.0, float(re.search(r"\d+(\.\d+)?", r["content"][0]["text"]).group(0))))
+    return min(4.0, max(0.0, float(re.search(r"\d+(\.\d+)?", claude(prompt, 10)[0]).group(0))))
 
 
 def score(rec):
@@ -798,7 +843,7 @@ def rebuild():
     health = load(HEALTH, {})
     for st in STATES:
         if health.get(st, {}).get("status") == "ok" and scraped(st):
-            process(f"states-{st.lower()}", state_items(st), state_update)
+            process(f"states-{st.lower()}", state_items(st, label_actions(st)), state_update)
 
 
 def serve():
@@ -922,11 +967,14 @@ def process(feed, items, update):
 
     with ThreadPoolExecutor(6) as pool:
         done = [d for d in pool.map(one, todo) if d]
+    # A milestone found late (an AI label, a scraper fix) gets its page, but old news doesn't get posted.
+    week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
+    fresh = {k for k, v in todo if v.get("_date", "9999") >= week}
     seen |= {k for k, _ in (new if first else done)}  # a first run never retries or posts the backlog
     write(path, json.dumps(sorted(seen)))
     if not first:
         with queue_lock():
-            queue = load(qpath, []) + [{"id": r["id"], "key": k, "interest": r.get("interest"), "at": time.time()} for k, r in done]
+            queue = load(qpath, []) + [{"id": r["id"], "key": k, "interest": r.get("interest"), "at": time.time()} for k, r in done if k in fresh]
             write(qpath, json.dumps(queue))
     with lock:
         build_site()
