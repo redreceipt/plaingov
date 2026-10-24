@@ -65,8 +65,9 @@ for i, (sess, ident, acts) in enumerate([("2025-2026", "H 3305", [act("2026-02-0
 save_ids("SC")
 os.environ["LEGISCAN_API_KEY"] = "test"
 ml = lambda year: {"session": {"year_start": year, "special": 0, "session_name": f"{year} Regular"}, **{str(i): {
-    "bill_id": i, "number": n, "status": s, "status_date": "2026-10-01", "title": "T", "url": f"https://legiscan.com/SC/bill/{n}/2025"}
-    for i, (n, s) in enumerate([("H3305", 3), ("H3305", 2), ("S0012", 2), ("H4000", 4)])}}
+    "bill_id": i, "number": n, "status": s, "status_date": d, "title": "T", "url": f"https://legiscan.com/SC/bill/{n}/2025"}
+    for i, (n, s, d) in enumerate([("H3305", 3, "9999-01-01"), ("H3305", 2, "9999-01-01"), ("S0012", 2, "9999-01-01"), ("H4000", 4, "9999-01-01"),
+                                   ("S99", 4, "2020-01-01")])}}  # S99: an old milestone the scraper missed isn't news
 plaingov.fetch = lambda *a, **k: json.dumps({"status": "OK", "masterlist": ml(2025)})
 got = dict(legiscan_items("SC", json.load(open(f"{plaingov.DATA}/state/ids-sc.json"))))
 assert list(got) == ["SC-2025-2026-H 3305-3", "SC-2025-2026-S 12-2"], got

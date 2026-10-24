@@ -300,14 +300,15 @@ def save_ids(st):
     # shortcut: only the session with the most bills; special-session bills (numbers can repeat) aren't backed up
     sessions = [r[0] for r in rows]
     main = max(set(sessions), key=sessions.count, default=None)
-    write(f"{DATA}/state/ids-{st.lower()}.json", json.dumps({"year": int(max((r[3] for r in rows if r[0] == main), default=0)),
+    write(f"{DATA}/state/ids-{st.lower()}.json", json.dumps({"at": time.strftime("%Y-%m-%d", time.gmtime()), "year": int(max((r[3] for r in rows if r[0] == main), default=0)),
           "bills": {bill_num(i): [s, i, n] for s, i, n, _ in rows if s == main}}))
 
 
 def legiscan_items(st, known=None):
     """Milestones from LegiScan's bill list for a state: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed.
     As a backup for a broken scraper, `known` (save_ids) maps them onto the scraper's bill IDs and post keys, so a bill
-    never gets two pages or posts; bills the scraper didn't know, or already had at that stage, are skipped."""
+    never gets two pages or posts. Only milestones since that scrape count (scrapers can miss old ones, e.g. SC's "Act No.":
+    that's not news); bills the scraper didn't know, or already had at that stage, are skipped."""
     q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], "op": "getMasterList", "state": st})
     r = json.loads(fetch(f"https://api.legiscan.com/?{q}"))
     if r.get("status") != "OK":
@@ -323,7 +324,7 @@ def legiscan_items(st, known=None):
             item = {**b, "state": st, "status": (s, chamber, b["status_date"]), "_date": b["status_date"]}
             if known is None:
                 yield f"{st}-ls{b['bill_id']}-{s}", item
-            elif (k := known["bills"].get(bill_num(b["number"]))) and s > k[2]:
+            elif (k := known["bills"].get(bill_num(b["number"]))) and s > k[2] and b["status_date"] >= known["at"]:
                 yield f"{st}-{k[0]}-{k[1]}-{s}", {**item, "_session": k[0], "number": k[1]}
 
 
