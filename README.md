@@ -30,6 +30,7 @@ python3 plaingov.py scrape     # daemon: scrape every state ~daily -> pages + po
 python3 plaingov.py scrape SC  # scrape one state now
 python3 plaingov.py post       # post the most interesting queued update to @plaingov
 python3 plaingov.py site       # rebuild the static site
+python3 plaingov.py restage    # repair saved status fields + rebuild; no AI calls or posts
 python3 plaingov.py refresh    # rewrite existing pages after a prompt change (PROMPT_VERSION)
 python3 plaingov.py catchup    # pages for each state's 25 most recent laws and vetoes this year (no posts)
 python3 plaingov.py report     # X engagement for the last 7 days (emailed weekly by the hourly post run)
@@ -58,6 +59,10 @@ Environment (`~/plaingov.env` on the VM, never committed):
 ## Monitoring
 
 After every state scrape, `health.json` records status, bill counts, and errors, and [plaingov.com/status](https://plaingov.com/status/) shows it publicly. You get an email and a phone push (exe.dev) when a state's scraper fails, its bill count drops by half, it hasn't succeeded in 2 days, or it recovers. While a scraper fails, LegiScan fills in that state (at most once a day, under the scraper's own bill IDs so nothing posts twice) and /status says "Using backup source". Each alert checks the legislature's website so it says whether their site is down or our scraper needs a fix. An hourly GitHub Actions [watchdog](.github/workflows/watchdog.yml) fails (and GitHub emails you) if the site is down, the daemon stops writing `status/health.json`, or no state succeeds for a day, so it catches the VM itself dying.
+
+## Status repairs
+
+With feed jobs stopped and `~/plaingov-data/bills` backed up, run `python3 plaingov.py restage` after deploying a status fix. It corrects saved status fields and rebuilds pages without changing the posting queue. This preserves explanatory prose and marks corrected records for `refresh`. Review affected summaries against the official source and refresh them before relying on them; refresh uses the existing AI services. Unknown action chambers have no guessed next step. Alaska legislative resolves and explicitly identified constitutional amendment proposals do not use the law tracker.
 
 ## Deploy
 
