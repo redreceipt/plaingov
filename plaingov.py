@@ -34,9 +34,9 @@ UA = "PlainGov/1.0 (+https://plaingov.com/about/)"  # some legislatures (PA, MI)
 URL_LEN = 23  # X counts every link as 23 chars
 
 
-def fetch(url, data=None, headers={}):
+def fetch(url, data=None, headers={}, timeout=120):
     req = urllib.request.Request(url, data=data, headers={"User-Agent": UA, **headers})
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode(r.headers.get_content_charset() or "utf-8", "replace")
 
 
@@ -150,6 +150,7 @@ def congress_update(b):
         st["next"] = ""
     path = f"bill/{b['congress']}/{t.lower()}/{b['number']}"
     sponsors = api(path)["bill"].get("sponsors") or [{}]
+    bioguide = sponsors[0].get("bioguideId")
     summaries = api(f"{path}/summaries").get("summaries") or []
     crs = strip(max(summaries, key=lambda x: x.get("updateDate", ""))["text"]) if summaries else ""
     text = ""
@@ -163,6 +164,7 @@ def congress_update(b):
         "label": f"{label} {b['number']}", "resolution": t in RESOLUTIONS, "title": b["title"],
         "official_url": f"https://www.congress.gov/bill/{ordinal(b['congress'])}-congress/{slug}/{b['number']}",
         "sponsor": sponsor_name(sponsors[0].get("fullName")), "date": a["actionDate"], "stage": st,
+        "sponsor_bioguide_id": bioguide if isinstance(bioguide, str) and re.fullmatch(r"[A-Z][0-9]{6}", bioguide) else None,
         "milestone": st["step"] >= 1, "source": " ".join(x for x in (b["title"], crs, text) if x)[:SOURCE_CHARS],
         "actions": [f"{a['actionDate']}: {a['text']}"],
     }
@@ -954,7 +956,28 @@ def participation(r):
             '<p class=meta>These links open government websites. PlainGov does not collect your address or send messages for you.</p></section>')
 
 
-def bill_page(r):
+def house_members():
+    """Verify current House membership from the Clerk, not names or historical predecessor IDs."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(fetch("https://clerk.house.gov/xml/lists/MemberData.xml", timeout=10))
+        congress = int(root.findtext("title-info/congress-num") or 0)
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+        ids = set()
+        for member in root.findall("members/member/member-info"):
+            bioguide, sworn = member.findtext("bioguideID") or "", member.find("sworn-date")
+            if re.fullmatch(r"[A-Z][0-9]{6}", bioguide) and sworn is not None and sworn.get("date"):
+                if datetime.date.fromisoformat(sworn.get("date")) <= today:
+                    ids.add(bioguide)
+        if congress < 1 or not ids:
+            raise ValueError("no verified House members or Congress number")
+        return {"ids": ids, "congress": congress, "checked": today.isoformat()}
+    except Exception as ex:
+        print(f"House roster unavailable; omitting sponsor links: {ex!r}", file=sys.stderr, flush=True)
+        return {}
+
+
+def bill_page(r, house={}):
     st = r["stage"]
     if r.get("amendment"):
         track = "<p>This proposes a constitutional amendment. Legislative approval alone does not change the constitution.</p>"
@@ -976,7 +999,14 @@ def bill_page(r):
         explain += "<p class=meta>So far we only have this bill's official title and description, so there isn't more to explain yet. The full bill is linked below.</p>"
     record = "".join(f"<li>{e(a)}</li>" for a in reversed(r.get("actions") or []))
     record = f"<p class=meta>From the official record:</p><ul class=meta>{record}</ul>" if record else ""
-    sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}</dd>" if r.get("sponsor") else ""
+    sponsor = ""
+    if r.get("sponsor"):
+        profile = ""
+        bioguide = r.get("sponsor_bioguide_id")
+        if not r.get("state") and isinstance(bioguide, str) and bioguide in house.get("ids", set()):
+            profile = (f'<br><a href="https://clerk.house.gov/members/{bioguide}">Official House profile and contact details</a>'
+                       f'<span class=meta>{ordinal(house["congress"])} Congress · roster checked {date(house["checked"])}</span>')
+        sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}{profile}</dd>"
     history = ""
     if len(r["updates"]) > 1:
         history = "<h2>How it got here</h2><ul class=list>" + "".join(
@@ -1034,8 +1064,9 @@ NOT_FOUND = """<h1>Hmm, that page doesn't exist.</h1>
 def build_site():
     site = f"{DATA}/site"
     recs = [json.load(open(p)) for p in glob.glob(f"{DATA}/bills/**/*.json", recursive=True)]
+    house = house_members() if any(not r.get("state") and r.get("sponsor_bioguide_id") for r in recs) else {}
     for r in recs:
-        write(f"{site}/{r['id']}/index.html", bill_page(r))
+        write(f"{site}/{r['id']}/index.html", bill_page(r, house))
     us = [r for r in recs if not r.get("state")]
     states = [r for r in recs if r.get("state")]
     week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))

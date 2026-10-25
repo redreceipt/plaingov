@@ -64,6 +64,12 @@ After every state scrape, `health.json` records status, bill counts, and errors,
 
 With feed jobs stopped and `~/plaingov-data/bills` backed up, run `python3 plaingov.py restage` after deploying a status fix. It corrects saved status fields and rebuilds pages without changing the posting queue. This preserves explanatory prose and marks corrected records for `refresh`. Review affected summaries against the official source and refresh them before relying on them; refresh uses the existing AI services. Unknown action chambers have no guessed next step. Alaska legislative resolves, California joint resolutions and explicitly identified constitutional amendment proposals do not use the law tracker. California's [Assembly Chief Clerk glossary](https://clerk.assembly.ca.gov/glossary-terms) confirms joint resolutions have no force of law and need no Governor's signature; this rule does not apply to other jurisdictions. Known resolution/amendment classifications survive backup-feed updates.
 
+## Sponsor links
+
+Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them exactly against the [House Clerk's current roster](https://clerk.house.gov/xml/lists/MemberData.xml), excluding predecessors, vacant seats and future swearing-in dates. Verified matches link to the Clerk's profile/contact page with the Congress number and check date. The sponsor may not represent the reader.
+
+This pilot covers current House members only. Missing IDs, former members and roster failures keep plain sponsor names and the existing representative-finder links. Each rebuild with sponsor IDs makes one roster request (10-second timeout); no cached membership, guessed profiles, phone calls or messages. Existing records acquire IDs on their next Congress update; no bulk rewrite or repost is needed.
+
 ## Deploy
 
 ```

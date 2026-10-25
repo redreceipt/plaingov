@@ -83,6 +83,53 @@ for state, label in (("CA", "AB 1"), ("NJ", "SJR 1")):
 
 assert sponsor_name("Rep. Smith, John [R-TX-5]") == "Rep. John Smith (R-TX)"
 
+# Congress preserves the authoritative sponsor ID; unknown/malformed IDs never become links.
+original_api, original_fetch = plaingov.api, plaingov.fetch
+BILL = {"congress": 119, "type": "HR", "number": "1", "title": "A bill", "latestAction": {"text": "Introduced in House", "actionDate": "2026-10-01"}}
+try:
+    for bioguide in ("K000389", None, "k000389", "../K000389", "K00038\"", "K٠٠٠٣٨٩", {}):
+        plaingov.api = lambda path: {"bill": {"sponsors": [{"fullName": "Rep. Khanna, Ro [D-CA-17]", "bioguideId": bioguide}]}, "summaries": [], "textVersions": []}
+        update = plaingov.congress_update(BILL)
+        assert update["sponsor_bioguide_id"] == (bioguide if bioguide == "K000389" else None)
+        if bioguide == "K000389":
+            current = {**rec, **update}
+    plaingov.api = lambda path: {"bill": {"sponsors": []}, "summaries": [], "textVersions": []}
+    assert plaingov.congress_update(BILL)["sponsor_bioguide_id"] is None
+    # Only sworn current member-info counts, not vacant-seat predecessors or future members.
+    roster = '''<MemberData><title-info><congress-num>119</congress-num></title-info><members>
+      <member><member-info><bioguideID>K000389</bioguideID><sworn-date date="20250103"/></member-info></member>
+      <member><member-info><bioguideID/></member-info><predecessor-info><pred-memindex>L000551</pred-memindex></predecessor-info></member>
+      <member><member-info><bioguideID>F000001</bioguideID><sworn-date date="99990101"/></member-info></member>
+      <member><member-info><bioguideID>U000001</bioguideID><sworn-date date=""/></member-info></member>
+      <member><member-info><bioguideID>../bad</bioguideID><sworn-date date="20250103"/></member-info></member>
+      </members></MemberData>'''
+    requests = []
+    def roster_fetch(url, **kwargs):
+        requests.append((url, kwargs))
+        return roster
+    plaingov.fetch = roster_fetch
+    house = plaingov.house_members()
+    assert house["ids"] == {"K000389"} and house["congress"] == 119
+    assert requests == [("https://clerk.house.gov/xml/lists/MemberData.xml", {"timeout": 10})]
+    p = bill_page(current, house)
+    assert 'href="https://clerk.house.gov/members/K000389"' in p and "119th Congress · roster checked" in p
+    assert "Rep. Ro Khanna (D-CA)" in p and "The sponsor may not represent you" in p
+    for absent in (None, "L000551", "F000001", "U000001", {}):
+        p = bill_page({**current, "sponsor_bioguide_id": absent}, house)
+        assert "clerk.house.gov/members/" not in p and "Rep. Ro Khanna (D-CA)" in p
+    assert "clerk.house.gov/members/" not in bill_page({**current, "state": "CA"}, house)
+    assert "clerk.house.gov/members/" not in bill_page(current)
+    assert "&lt;script&gt;" in bill_page({**current, "sponsor": "<script>"}, house)
+    for bad in ("not XML", "<MemberData/>", roster.replace("<congress-num>119</congress-num>", "")):
+        plaingov.fetch = lambda *args, **kwargs: bad
+        assert plaingov.house_members() == {}
+    def unavailable(*args, **kwargs):
+        raise TimeoutError("roster unavailable")
+    plaingov.fetch = unavailable
+    assert plaingov.house_members() == {}
+finally:
+    plaingov.api, plaingov.fetch = original_api, original_fetch
+
 # Contact links stay official and do not collect addresses or send messages.
 p = bill_page(rec)
 assert 'id="participate"' in p and "house.gov/representatives/find-your-representative" in p and "senate.gov/senators/senators-contact.htm" in p
