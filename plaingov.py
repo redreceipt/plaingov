@@ -34,9 +34,9 @@ UA = "PlainGov/1.0 (+https://plaingov.com/about/)"  # some legislatures (PA, MI)
 URL_LEN = 23  # X counts every link as 23 chars
 
 
-def fetch(url, data=None, headers={}):
+def fetch(url, data=None, headers={}, timeout=120):
     req = urllib.request.Request(url, data=data, headers={"User-Agent": UA, **headers})
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode(r.headers.get_content_charset() or "utf-8", "replace")
 
 
@@ -150,6 +150,7 @@ def congress_update(b):
         st["next"] = ""
     path = f"bill/{b['congress']}/{t.lower()}/{b['number']}"
     sponsors = api(path)["bill"].get("sponsors") or [{}]
+    bioguide = sponsors[0].get("bioguideId")
     summaries = api(f"{path}/summaries").get("summaries") or []
     crs = strip(max(summaries, key=lambda x: x.get("updateDate", ""))["text"]) if summaries else ""
     text = ""
@@ -163,6 +164,7 @@ def congress_update(b):
         "label": f"{label} {b['number']}", "resolution": t in RESOLUTIONS, "title": b["title"],
         "official_url": f"https://www.congress.gov/bill/{ordinal(b['congress'])}-congress/{slug}/{b['number']}",
         "sponsor": sponsor_name(sponsors[0].get("fullName")), "date": a["actionDate"], "stage": st,
+        "sponsor_bioguide_id": bioguide if isinstance(bioguide, str) and re.fullmatch(r"[A-Z][0-9]{6}", bioguide) else None,
         "milestone": st["step"] >= 1, "source": " ".join(x for x in (b["title"], crs, text) if x)[:SOURCE_CHARS],
         "actions": [f"{a['actionDate']}: {a['text']}"],
     }
@@ -282,9 +284,29 @@ def state_id(b):
     return f"states/{b['state'].lower()}/{slug(b['legislative_session'])}-{slug(b['identifier'])}"
 
 
+def ma_sponsor(b):
+    """Keep the official presenter's profile ID, never resolve a name to a person."""
+    people = [s for s in b["sponsorships"] if s["primary"]]
+    if b["state"] != "MA" or len(people) != 1 or people[0].get("entity_type") != "person":
+        return None
+    url = next((s["url"] for s in b["sources"] if re.fullmatch(r"https://malegislature\.gov/Bills/[0-9]+/[A-Za-z0-9]+", s["url"])), None)
+    if not url:
+        return None
+    try:
+        page = fetch(url, timeout=10)
+        presenter = re.search(r"(?s)<dt\b[^>]*>\s*Presenter:\s*</dt>\s*<dd\b[^>]*>(.*?)</dd>", page)
+        links = re.findall(r'<a\b[^>]*href="/Legislators/Profile/([A-Za-z0-9_]+)"[^>]*>(.*?)</a>', presenter[1], re.S) if presenter else []
+        if len(links) == 1 and strip(links[0][1]) == people[0]["name"]:
+            return links[0][0]
+    except Exception as ex:
+        print(f"MA presenter unavailable: {ex!r}", file=sys.stderr, flush=True)
+    return None
+
+
 def state_update(b):
     st, (status, chamber, day) = b["state"], b["status"]
     people = [s for s in b["sponsorships"] if s["primary"]] or b["sponsorships"]
+    person_id = people[0].get("person_id") if people else None
     sponsor = None
     if people:
         lower = "Asm. " if st in ASSEMBLY else "Rep. "
@@ -297,6 +319,8 @@ def state_update(b):
         "id": state_id(b), "where": STATES[st], "state": st, "actions": last_actions(b.get("actions", [])),
         "label": b["identifier"], "resolution": False, "amendment": "constitutional amendment" in b.get("classification", []), "title": b["title"], "official_url": (b["sources"] or [{"url": ""}])[0]["url"],
         "sponsor": sponsor, "date": day, "stage": state_stage(st, status, chamber), "milestone": True, "source": source,
+        "sponsor_profile_id": ma_sponsor(b),
+        "sponsor_person_id": person_id if isinstance(person_id, str) and re.fullmatch(r"ocd-person/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", person_id) else None,
     }
 
 
@@ -939,6 +963,8 @@ def participation(r):
     if not r.get("state"):
         links = [("Find your U.S. representative", "https://www.house.gov/representatives/find-your-representative"),
                  ("Find your U.S. senators", "https://www.senate.gov/senators/senators-contact.htm")]
+    elif r["state"] == "MA":
+        links = [("Find your Massachusetts legislators", "https://malegislature.gov/Search/FindMyLegislator")]
     elif r["state"] == "NY":
         links = [("Find your New York assemblymember", "https://nyassembly.gov/mem/search/"),
                  ("Find your New York state senator", "https://www.nysenate.gov/find-my-senator")]
@@ -954,7 +980,53 @@ def participation(r):
             '<p class=meta>These links open government websites. PlainGov does not collect your address or send messages for you.</p></section>')
 
 
-def bill_page(r):
+def house_members():
+    """Verify current House membership from the Clerk, not names or historical predecessor IDs."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(fetch("https://clerk.house.gov/xml/lists/MemberData.xml", timeout=10))
+        congress = int(root.findtext("title-info/congress-num") or 0)
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+        ids = set()
+        for member in root.findall("members/member/member-info"):
+            bioguide, sworn = member.findtext("bioguideID") or "", member.find("sworn-date")
+            if re.fullmatch(r"[A-Z][0-9]{6}", bioguide) and sworn is not None and sworn.get("date"):
+                if datetime.date.fromisoformat(sworn.get("date")) <= today:
+                    ids.add(bioguide)
+        if congress < 1 or not ids:
+            raise ValueError("no verified House members or Congress number")
+        return {"ids": ids, "congress": congress, "checked": today.isoformat()}
+    except Exception as ex:
+        print(f"House roster unavailable; omitting sponsor links: {ex!r}", file=sys.stderr, flush=True)
+        return {}
+
+
+def sponsor_profiles(recs):
+    """Only current official rosters can turn persisted sponsor IDs into links."""
+    import xml.etree.ElementTree as ET
+    links = {}
+    if any(not r.get("state") and r.get("sponsor_bioguide_id") for r in recs):
+        house = house_members()
+        links.update({f"US:{id}": (f"https://clerk.house.gov/members/{id}", "Official House profile and contact details", f'{ordinal(house["congress"])} Congress') for id in house.get("ids", [])})
+        try:
+            root = ET.fromstring(fetch("https://www.senate.gov/general/contact_information/senators_cfm.xml", timeout=10))
+            senators = {m.findtext("bioguide_id"): m.findtext("state") for m in root.findall("member")}
+            links.update({f"US:{id}": (f"https://www.senate.gov/states/{st}/intro.htm", "Official Senate directory and contact details", f"Current Senate roster · {STATES[st]}")
+                          for id, st in senators.items() if re.fullmatch(r"[A-Z][0-9]{6}", id or "") and st in STATES})
+        except Exception as ex:
+            print(f"Senate roster unavailable; omitting Senate links: {ex!r}", file=sys.stderr, flush=True)
+    if any(r.get("state") == "MA" and r.get("sponsor_profile_id") for r in recs):
+        for chamber in ("House", "Senate"):
+            try:
+                page = fetch(f"https://malegislature.gov/Legislators/Members/{chamber}", timeout=10)
+                ids = re.findall(r'<a\b[^>]*href="/Legislators/Profile/([A-Za-z0-9_]+)"', page)
+                links.update({f"MA:{id}": (f"https://malegislature.gov/Legislators/Profile/{id}", "Official Massachusetts profile and contact details", f"Current Massachusetts {chamber} roster") for id in ids})
+            except Exception as ex:
+                print(f"MA {chamber} roster unavailable; omitting its links: {ex!r}", file=sys.stderr, flush=True)
+    return {"links": links, "checked": datetime.datetime.now(datetime.timezone.utc).date().isoformat()}
+
+
+def bill_page(r, profiles={}):
     st = r["stage"]
     if r.get("amendment"):
         track = "<p>This proposes a constitutional amendment. Legislative approval alone does not change the constitution.</p>"
@@ -976,7 +1048,16 @@ def bill_page(r):
         explain += "<p class=meta>So far we only have this bill's official title and description, so there isn't more to explain yet. The full bill is linked below.</p>"
     record = "".join(f"<li>{e(a)}</li>" for a in reversed(r.get("actions") or []))
     record = f"<p class=meta>From the official record:</p><ul class=meta>{record}</ul>" if record else ""
-    sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}</dd>" if r.get("sponsor") else ""
+    sponsor = ""
+    if r.get("sponsor"):
+        profile = ""
+        id = r.get("sponsor_profile_id") if r.get("state") else r.get("sponsor_bioguide_id")
+        match = profiles.get("links", {}).get(f"{r.get('state') or 'US'}:{id}") if isinstance(id, str) else None
+        if match:
+            url, label, term = match
+            profile = (f'<br><a href="{e(url)}">{e(label)}</a>'
+                       f'<span class=meta>{e(term)} · roster checked {date(profiles["checked"])}</span>')
+        sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}{profile}</dd>"
     history = ""
     if len(r["updates"]) > 1:
         history = "<h2>How it got here</h2><ul class=list>" + "".join(
@@ -1034,8 +1115,9 @@ NOT_FOUND = """<h1>Hmm, that page doesn't exist.</h1>
 def build_site():
     site = f"{DATA}/site"
     recs = [json.load(open(p)) for p in glob.glob(f"{DATA}/bills/**/*.json", recursive=True)]
+    profiles = sponsor_profiles(recs)
     for r in recs:
-        write(f"{site}/{r['id']}/index.html", bill_page(r))
+        write(f"{site}/{r['id']}/index.html", bill_page(r, profiles))
     us = [r for r in recs if not r.get("state")]
     states = [r for r in recs if r.get("state")]
     week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))

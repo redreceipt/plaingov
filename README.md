@@ -64,6 +64,14 @@ After every state scrape, `health.json` records status, bill counts, and errors,
 
 With feed jobs stopped and `~/plaingov-data/bills` backed up, run `python3 plaingov.py restage` after deploying a status fix. It corrects saved status fields and rebuilds pages without changing the posting queue. This preserves explanatory prose and marks corrected records for `refresh`. Review affected summaries against the official source and refresh them before relying on them; refresh uses the existing AI services. Unknown action chambers have no guessed next step. Alaska legislative resolves, California joint resolutions and explicitly identified constitutional amendment proposals do not use the law tracker. California's [Assembly Chief Clerk glossary](https://clerk.assembly.ca.gov/glossary-terms) confirms joint resolutions have no force of law and need no Governor's signature; this rule does not apply to other jurisdictions. Known resolution/amendment classifications survive backup-feed updates.
 
+## Sponsor links
+
+Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them against the [House Clerk](https://clerk.house.gov/xml/lists/MemberData.xml) and [Senate](https://www.senate.gov/general/contact_information/senators_cfm.xml) current-member rosters. Verified matches link to official profiles/contact pages with the roster and check date. Senators link to Senate.gov's state contact directory, which lists both senators and their office details; individual senator sites blocked automated verification. The sponsor may not represent the reader.
+
+The state pilot covers Massachusetts House and Senate members. Ingestion reads the explicit Presenter profile link on the official bill page, checks its displayed name against the scraper's sole primary sponsor, and preserves its profile ID. Rebuilds check that ID against the current official chamber directories. Committees, multiple presenters, mismatches and former members stay unlinked. Resolved Open States person IDs are also preserved; name placeholders are not IDs. Other states retain official representative finders, not guessed sponsor profiles.
+
+Roster failures omit affected links; no cached membership is reused. Rebuilds make up to four public roster requests, only for jurisdictions with sponsor IDs; MA ingestion adds one bill-page request. Each has a 10-second timeout. Existing records acquire IDs on subsequent ingestion; metadata-only rollout enrichment needs no AI rewrite or repost. No calls or messages are sent, and PlainGov collects no addresses.
+
 ## Deploy
 
 ```
