@@ -5,6 +5,7 @@ Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post qu
        plaingov.py scrape     daemon: run each state legislature's scraper about daily -> pages + post queue + alerts
        plaingov.py post       post the most interesting queued update to X (@plaingov)
        plaingov.py site       rebuild the site only
+       plaingov.py restage    repair saved status fields without AI calls or posts
        plaingov.py refresh    rewrite existing pages from before the current prompt (PROMPT_VERSION)
        plaingov.py catchup    pages for each state's 25 most recent laws and vetoes this year (no posts)
        plaingov.py report     X engagement for the last 7 days (the hourly post run sends it weekly)
@@ -97,8 +98,9 @@ def ordinal(n):
 
 
 def us_stage(desc):
-    """Stage from a Congress.gov action, like "Passed/agreed to in Senate: ..." or "Became Public Law No: 119-45."."""
-    ch = "House" if "House" in desc else "Senate"
+    """Stage from a Congress.gov action; omit chamber-specific claims when the action does not identify one."""
+    match = re.search(r"\b(House|Senate)\b", desc)
+    ch = match[0] if match else None
     other = "Senate" if ch == "House" else "House"
     if "Public Law" in desc:
         return stage(3, "It's law", "It's officially law now.")
@@ -106,6 +108,9 @@ def us_stage(desc):
         return stage(2, "Vetoed", "The President said no (that's a veto).", "Congress can still make it law if two-thirds of the House and Senate vote to overrule the President.")
     if re.search(r"Presented to President|Resolving differences|agreed? to (the )?(House|Senate) amendment", desc):
         return stage(2, "Passed Congress", "The House and Senate both said yes.", "Now it's up to the President to sign it or not.")
+    if not ch:
+        return stage(0, "In Congress" if desc.startswith(("Passed", "Reported")) else "Proposed",
+                     "An action was recorded in Congress." if desc.startswith(("Passed", "Reported")) else "The bill is before Congress.")
     if desc.startswith("Passed"):
         return stage(1, f"Passed the {ch}", f"The {ch} voted yes.", f"Now the {other} has to say yes too.")
     if desc.startswith("Reported"):
@@ -291,7 +296,7 @@ def state_update(b):
     source = " ".join(x for x in (b["title"], abstract, bill_text(b)) if x)[:SOURCE_CHARS]
     return {
         "id": state_id(b), "where": STATES[st], "state": st, "actions": last_actions(b.get("actions", [])),
-        "label": b["identifier"], "resolution": False, "title": b["title"], "official_url": (b["sources"] or [{"url": ""}])[0]["url"],
+        "label": b["identifier"], "resolution": False, "amendment": "constitutional amendment" in b.get("classification", []), "title": b["title"], "official_url": (b["sources"] or [{"url": ""}])[0]["url"],
         "sponsor": sponsor, "date": day, "stage": state_stage(st, status, chamber), "milestone": True, "source": source,
     }
 
@@ -625,7 +630,9 @@ def rewrite(rec):
     run instead of publishing something vague or wrong."""
     actions = "\n".join(rec.get("actions") or [f"{rec['date']}: {rec['stage']['now']}"])
     prompt = PROMPT.format(**{**rec, "actions": actions, "status": rec["stage"]["now"] + (
-        " This IS law now: use present tense, or say when it starts if that's later." if rec["stage"]["step"] == 3
+        " This is a constitutional amendment proposal, not an enacted law." if rec.get("amendment")
+        else " This is a resolution, not an enacted law. Describe its requests or position, not legal requirements." if rec.get("resolution")
+        else " This IS law now: use present tense, or say when it starts if that's later." if rec["stage"]["step"] == 3
         else " This is NOT law yet: say what it would do.")})
     for model in (LLM_MODEL, LLM_MODEL, STAGE_MODEL):
         out = ask_json(prompt, 6000, model)
@@ -747,8 +754,55 @@ def score(rec):
     return rec["interest"]
 
 
+def normalize_stage(r):
+    """Correct status from official evidence, not AI-written explanations or resolution prefixes alone."""
+    old = r["stage"]
+    actions = r.get("actions") or []
+    if not r.get("state") and actions:
+        r["stage"] = us_stage(actions[-1].split(": ", 1)[-1])
+        r["milestone"] = r["stage"]["step"] >= 1
+    # shortcut: recognize Alaska's official filing; add other states only with verified instrument rules.
+    if (r.get("state") == "AK" and re.match(r"^[HS]J?R\s*\d", r["label"])
+            and any(re.search(r"PERMANENTLY FILED.*\bLEGIS RESOLVE\s+\d", a, re.I) for a in actions)):
+        r["resolution"] = True
+    if re.match(r"Proposing (?:an amendment|amendments) to .*constitution", r["title"], re.I):
+        r["amendment"] = True
+    if r.get("amendment"):
+        r["resolution"] = False
+    if r.get("resolution") or r.get("amendment"):
+        st = r["stage"]
+        if st["step"] >= 2 and "eto" not in st["short"]:
+            r["stage"] = (stage(2, "Passed lawmakers", "Lawmakers approved the constitutional amendment proposal.",
+                                "Legislative approval alone does not change the constitution. Check the official record for ratification.")
+                          if r.get("amendment") else stage(2, "Adopted", "Lawmakers adopted this resolution."))
+        else:
+            r["stage"] = {**st, "next": ""}
+    if r["stage"] != old:
+        for u in r.get("updates", []):
+            if u == {"date": r["date"], "short": old["short"], "now": old["now"]}:
+                u.update(short=r["stage"]["short"], now=r["stage"]["now"])
+    return r
+
+
+def restage():
+    """Repair saved status fields and rebuild pages without AI calls or enqueueing posts."""
+    changed = 0
+    with queue_lock():
+        for path in glob.glob(f"{DATA}/bills/**/*.json", recursive=True):
+            r = json.load(open(path))
+            before = json.dumps(r)
+            normalize_stage(r)
+            if json.dumps(r) != before:
+                r["v"] = 0  # refresh must re-check prose written against the old status
+                write(path, json.dumps(r, indent=1))
+                changed += 1
+        build_site()
+    print(f"restage: corrected {changed} records; no posts queued")
+
+
 def save(new):
     """Merge an update into the bill's record; only re-run the rewrite when the source or status changed."""
+    normalize_stage(new)
     path = f"{DATA}/bills/{new['id']}.json"
     rec = load(path, {"updates": []})
     if (rec.get("source"), rec.get("stage"), rec.get("v")) != (new["source"], new["stage"], PROMPT_VERSION):
@@ -858,13 +912,18 @@ def newest(recs, n):
 
 def by_stage(recs, where):
     """List page body: newest first within plain-language stage groups."""
+    special = [r for r in recs if r.get("resolution") or r.get("amendment")]
     groups = [("New laws", lambda s: s["step"] == 3), ("Vetoed", lambda s: "eto" in s["short"]),
               ("Waiting on a signature", lambda s: s["step"] == 2), ("Halfway there", lambda s: s["step"] == 1),
-              ("Proposed", lambda s: s["step"] == 0)]
-    out, left = "", recs
+              ("In Congress", lambda s: s["short"] == "In Congress"), ("Proposed", lambda s: s["step"] == 0)]
+    out, left = "", [r for r in recs if not r.get("resolution") and not r.get("amendment")]
     for name, match in groups:
         hit = [r for r in left if match(r["stage"])]
         left = [r for r in left if r not in hit]
+        if hit:
+            out += f"<h2>{name}</h2>" + items(newest(hit, 25), where)
+    for name, flag in (("Resolutions", "resolution"), ("Constitutional amendment proposals", "amendment")):
+        hit = [r for r in special if r.get(flag)]
         if hit:
             out += f"<h2>{name}</h2>" + items(newest(hit, 25), where)
     return out or "<p>Nothing new here yet. We check every day, so come back soon.</p>"
@@ -872,9 +931,10 @@ def by_stage(recs, where):
 
 def bill_page(r):
     st = r["stage"]
-    if r["resolution"]:
-        where = "House" if r["label"].startswith("H") else "Senate"
-        track = f"<p>This is a resolution: basically the {where} saying where it stands. It doesn't become a law.</p>"
+    if r.get("amendment"):
+        track = "<p>This proposes a constitutional amendment. Legislative approval alone does not change the constitution.</p>"
+    elif r["resolution"]:
+        track = "<p>This is a resolution, not an enacted law.</p>"
     else:
         track = "<ol class=tracker>" + "".join(
             f"<li{' class=done' if i <= st['step'] else ''}{' aria-current=step' if i == st['step'] else ''}>{s}</li>"
@@ -1285,4 +1345,4 @@ if __name__ == "__main__":
     cmd, arg = sys.argv[1], (sys.argv[2:] or [None])[0]
     if cmd == "congress":
         sys.exit(1 if process("congress", congress_items(), congress_update)[2] else 0)
-    {"site": build_site, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh, "catchup": catchup, "report": report}[cmd]()
+    {"site": build_site, "restage": restage, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh, "catchup": catchup, "report": report}[cmd]()

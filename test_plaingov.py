@@ -32,6 +32,40 @@ assert us_stage("Passed/agreed to in Senate: Passed Senate with an amendment by 
 assert us_stage("Resolving differences -- House actions: On motion that the House agree to the Senate amendment Agreed to")["step"] == 2
 assert us_stage("Presented to President.")["short"] == "Passed Congress" and us_stage("Vetoed by President.")["short"] == "Vetoed"
 assert us_stage("Became Public Law No: 119-45.")["step"] == 3 and us_stage("Read twice and referred to the Committee on Finance.")["short"] == "Proposed"
+# No chamber is safer than inferring Senate from the absence of "House".
+referral = "Referred to the Committee on Energy and Commerce, and in addition to the Committee on Ways and Means."
+assert us_stage(referral)["next"] == "" and "senator" not in us_stage(referral)["now"]
+assert us_stage("Read twice and referred to the Committee on Finance.")["next"] == ""
+assert us_stage("Received in Senate and referred to the Committee on Finance.")["next"].startswith("A small group in the Senate")
+assert us_stage("Passed/agreed to in Senate: Passed Senate with an amendment to the House bill.")["short"] == "Passed the Senate"
+assert us_stage("Passed by unanimous consent.")["short"] == "In Congress"
+
+# Instrument status comes from official evidence, not every HJR/SJR prefix.
+ak = {**rec, "id": "states/ak/2025-hjr32", "state": "AK", "where": "Alaska", "label": "HJR 32",
+      "source": "Legislative Resolve No. 28", "actions": ["2026-09-30: PERMANENTLY FILED 9/22 LEGIS RESOLVE 28"],
+      "stage": us_stage("Public Law"), "updates": []}
+r = plaingov.normalize_stage(ak)
+assert r["resolution"] and r["stage"]["short"] == "Adopted"
+assert "tracker" not in bill_page(r).split('<main id="main"')[1].split("</main>")[0]
+assert "<h2>Resolutions</h2>" in by_stage([r], False) and "<h2>New laws</h2>" not in by_stage([r], False)
+assert "It's law" not in tweet_text(r)
+r = plaingov.normalize_stage({**rec, "label": "H.J.Res. 1", "title": "Making continuing appropriations",
+                             "actions": ["2026-05-21: Became Public Law No: 119-1."], "updates": []})
+assert not r["resolution"] and r["stage"]["step"] == 3
+r = plaingov.normalize_stage({**r, "title": "Proposing an amendment to the Constitution of the United States.",
+                             "actions": ["2026-05-21: Passed Senate"], "updates": []})
+assert r["amendment"] and not r["resolution"] and "tracker" not in bill_page(r).split('<main id="main"')[1].split("</main>")[0]
+assert "<h2>Constitutional amendment proposals</h2>" in by_stage([r], False)
+r = plaingov.normalize_stage({**r, "actions": ["2026-05-21: Vetoed by President."]})
+assert r["stage"]["short"] == "Vetoed", "never turn a veto into approval"
+house = {**rec, "actions": ["2026-05-21: " + referral],
+         "stage": {"step": 0, "short": "Proposed", "now": "A senator proposed it.", "next": "Senate"},
+         "updates": [{"date": rec["date"], "short": "Proposed", "now": "A senator proposed it."}]}
+r = plaingov.normalize_stage(house)
+assert r["updates"][-1]["now"] == r["stage"]["now"] and not r["stage"]["next"]
+before = json.dumps(r)
+assert json.dumps(plaingov.normalize_stage(r)) == before, "repair is idempotent"
+
 assert sponsor_name("Rep. Smith, John [R-TX-5]") == "Rep. John Smith (R-TX)"
 
 # State milestones come from Open States action classifications.
@@ -64,6 +98,7 @@ SC_BILL = {"state": "SC", "status": (4, None, "2026-09-01"), "identifier": "H 33
                                    {"name": "Bannister", "primary": True, "entity_type": "person"}]}
 s = state_update(SC_BILL)
 assert (s["id"], s["label"], s["sponsor"], s["stage"]["short"]) == ("states/sc/2025-2026-h-3305", "H 3305", "Rep. Newton and 1 other", "It's law"), s
+assert state_update({**SC_BILL, "classification": ["constitutional amendment"]})["amendment"]
 assert state_update({**SC_BILL, "state": "CA"})["sponsor"] == "Asm. Newton and 1 other"  # lower chamber is the Assembly
 
 law = {**rec, "id": "a", "stage": us_stage("Public Law")}
@@ -155,6 +190,10 @@ r = rewrite({**rec, "source": "Hospitals and fire stations may accept infants un
 assert r["headline"] == "Hospitals and fire stations can take newborns" and r["details"] == ["Under 21 days old."], r
 assert [m for m, _ in calls] == ["claude-haiku-5-5", "gpt-6-luna"] * 2 and "Too vague" in calls[2][1] and "2026-09-09: Signed" in calls[0][1], calls
 
+calls.clear()
+rewrite({**rec, "resolution": True, "stage": {"step": 2, "short": "Adopted", "now": "Adopted", "next": ""}, "source": "A resolution urging action."})
+assert "This is a resolution, not an enacted law." in calls[0][1] and "This is NOT law yet" not in calls[0][1]
+
 # Pages show the specifics, the official record, and say so when we only have a title.
 p = bill_page({**rec, "details": ["Under 21 days old."], "changes": "Adds drop boxes.", "effective": "September 10, 2026",
                "happened": "The Governor signed it on September 9, 2026.", "actions": ["2026-09-09: SIGNED INTO LAW"], "limited": True})
@@ -175,4 +214,20 @@ assert (take_pages(3), take_pages(3), take_pages(1)) == (3, 2, 0)
 json.dump({"day": "2000-01-01", "pages": 5}, open(f"{plaingov.DATA}/state/budget.json", "w"))
 assert take_pages(9) == 5
 assert "Using backup source" in status_body({"SC": {"status": "failed", "backup": "LegiScan"}})
+# The maintenance command repairs disk records without touching the posting queue.
+repair = {**ak, "resolution": False, "stage": us_stage("Public Law"), "v": 5,
+          "updates": [{"date": ak["date"], "short": "It's law", "now": "It's officially law now."}]}
+path = f"{plaingov.DATA}/bills/{repair['id']}.json"
+plaingov.write(path, json.dumps(repair))
+plaingov.write(f"{plaingov.DATA}/state/queue.json", '[{"id":"keep-me"}]')
+plaingov.HEALTH = f"{plaingov.DATA}/health.json"
+plaingov.restage()
+fixed = json.load(open(path))
+assert fixed["stage"]["short"] == "Adopted" and fixed["v"] == 0
+assert fixed["summary"] == repair["summary"] and fixed["updates"][0]["short"] == "Adopted"
+before = open(path).read()
+plaingov.restage()
+assert open(path).read() == before
+assert json.load(open(f"{plaingov.DATA}/state/queue.json")) == [{"id": "keep-me"}]
+assert not os.path.exists(f"{plaingov.DATA}/state/posts.json")
 print("ok")
