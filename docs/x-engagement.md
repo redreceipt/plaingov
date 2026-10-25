@@ -16,7 +16,7 @@ Findings for #6 and #7, October 2026. Sources: X's published For You ranker ([xa
 | Single post vs thread | A thread's replies don't reach non-followers. | Keep single posts (#5). |
 | Links | A link click is worth 0.2, about a third of a like. Posts with a link cost $0.20 vs $0.015. There's no explicit link penalty, but a link mostly costs money without earning ranking. | Test milestone posts without links (#12). |
 | Images | Photo expand is worth 0.05. Any benefit would come from longer dwell and more shares. | Test a tracker card (#13). |
-| Asking a question | Replies are one of the strongest signals (5). | Test a neutral closing question (#14). |
+| Asking a question | Retired by editorial choice, not an experiment result. | No appended discussion prompts. Present concrete facts and let discussion happen organically (#44). |
 | Timing | The first 2 hours decide reach, and the hourly timer posts around the clock, including overnight in the U.S. | Post only during U.S. daytime (#11). |
 | Volume | 6 a day, spaced out, is fine. The ranker spaces out repeat authors on its own. | Keep it, and revisit with data. |
 | Topics and stages | Unknown until we measure. jev already picks what's most interesting. | Break down the weekly report by stage and by state vs federal. |
@@ -25,6 +25,10 @@ Findings for #6 and #7, October 2026. Sources: X's published For You ranker ([xa
 | Replying to news, quote posts | Automated replies based on keyword search are banned, and AI-generated replies need X's prior approval. | Skip. Do it by hand if at all. |
 | Auto-following (#7) | **Not worth it.** Bulk, aggressive, or automatic following is banned. In the ranker, who follows *us* (reputation, SimClusters) drives distribution, not who we follow. Government offices rarely follow back. | Don't build it. |
 | Measurement | Reading our own posts costs $0.001 each ("owned reads"): impressions, likes, reposts, replies, quotes, and bookmarks, plus profile and link clicks for posts under 30 days old. A week of 42 posts costs about $0.04. | Weekly report (#10). |
+
+## Editorial direction
+
+Lead with who is affected and the concrete change, preserving conditions and proposal/law status. No manufactured discussion questions, reaction prompts, or invented tradeoffs. The link experiment (#12) continues through November 7; #13 tracks the separate image trial. Historical question posts remain in reports so results are not relabeled.
 
 ## Also check
 
