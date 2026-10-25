@@ -180,7 +180,7 @@ assert state_update({**SC_BILL, "state": "CA"})["sponsor"] == "Asm. Newton and 1
 ma_bill = {**SC_BILL, "state": "MA", "sources": [{"url": "https://malegislature.gov/Bills/194/H3104"}],
            "sponsorships": [{"name": "Colleen M. Garry", "primary": True, "entity_type": "person", "person_id": '~{"name":"Colleen M. Garry"}'}]}
 presenter = '<dt class="label">Presenter:</dt><dd><a href="/Legislators/Profile/CMG1">Colleen M. Garry</a></dd>'
-senator = '<contact_information><member><bioguide_id>S001150</bioguide_id><website>https://www.schiff.senate.gov/</website></member></contact_information>'
+senator = '<contact_information><member><bioguide_id>S001150</bioguide_id><state>CA</state></member></contact_information>'
 original_fetch = plaingov.fetch
 try:
     plaingov.fetch = lambda *a, **k: presenter
@@ -205,14 +205,14 @@ try:
         return '<a href="/Legislators/Profile/MJR0">Senator</a>'
     plaingov.fetch = official_fetch
     profiles = plaingov.sponsor_profiles([current, senate_rec, ma_rec])
-    assert "Official Senate profile" in bill_page(senate_rec, profiles)
-    assert "https://www.schiff.senate.gov/" in bill_page(senate_rec, profiles)
+    assert "Official Senate directory" in bill_page(senate_rec, profiles)
+    assert "https://www.senate.gov/states/CA/intro.htm" in bill_page(senate_rec, profiles)
     assert "Official Massachusetts profile" in bill_page(ma_rec, profiles)
     assert "MA:MJR0" in profiles["links"], "both state chambers"
     assert "Official Massachusetts profile" not in bill_page({**ma_rec, "sponsor_profile_id": "FORMER"}, profiles)
     assert "Official Massachusetts profile" not in bill_page({**ma_rec, "state": "CA"}, profiles)
-    for bad_url in ("javascript:alert(1)", "https://senate.gov.evil.test/", "https://evil@www.schiff.senate.gov/", "http://www.schiff.senate.gov/"):
-        plaingov.fetch = lambda url, **k: senator.replace("https://www.schiff.senate.gov/", bad_url) if "senate.gov/general" in url else official_fetch(url, **k)
+    for invalid in ("../CA", "ca", "XX", "<script>"):
+        plaingov.fetch = lambda url, **k: senator.replace("<state>CA</state>", f"<state>{invalid}</state>") if "senate.gov/general" in url else official_fetch(url, **k)
         assert "US:S001150" not in plaingov.sponsor_profiles([senate_rec])["links"]
     def fail_senate(url, **kwargs):
         if "senate.gov/general" in url: raise TimeoutError("test outage")

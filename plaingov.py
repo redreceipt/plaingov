@@ -1007,12 +1007,12 @@ def sponsor_profiles(recs):
     links = {}
     if any(not r.get("state") and r.get("sponsor_bioguide_id") for r in recs):
         house = house_members()
-        links.update({f"US:{id}": (f"https://clerk.house.gov/members/{id}", "House", f'{ordinal(house["congress"])} Congress') for id in house.get("ids", [])})
+        links.update({f"US:{id}": (f"https://clerk.house.gov/members/{id}", "Official House profile and contact details", f'{ordinal(house["congress"])} Congress') for id in house.get("ids", [])})
         try:
             root = ET.fromstring(fetch("https://www.senate.gov/general/contact_information/senators_cfm.xml", timeout=10))
-            senators = {m.findtext("bioguide_id"): m.findtext("website") or "" for m in root.findall("member")}
-            links.update({f"US:{id}": (url, "Senate", "Current Senate roster") for id, url in senators.items()
-                          if re.fullmatch(r"[A-Z][0-9]{6}", id or "") and re.fullmatch(r'https://(?:[a-z0-9-]+\.)+senate\.gov(?:/[^\s<>"\']*)?', url)})
+            senators = {m.findtext("bioguide_id"): m.findtext("state") for m in root.findall("member")}
+            links.update({f"US:{id}": (f"https://www.senate.gov/states/{st}/intro.htm", "Official Senate directory and contact details", f"Current Senate roster · {STATES[st]}")
+                          for id, st in senators.items() if re.fullmatch(r"[A-Z][0-9]{6}", id or "") and st in STATES})
         except Exception as ex:
             print(f"Senate roster unavailable; omitting Senate links: {ex!r}", file=sys.stderr, flush=True)
     if any(r.get("state") == "MA" and r.get("sponsor_profile_id") for r in recs):
@@ -1020,7 +1020,7 @@ def sponsor_profiles(recs):
             try:
                 page = fetch(f"https://malegislature.gov/Legislators/Members/{chamber}", timeout=10)
                 ids = re.findall(r'<a\b[^>]*href="/Legislators/Profile/([A-Za-z0-9_]+)"', page)
-                links.update({f"MA:{id}": (f"https://malegislature.gov/Legislators/Profile/{id}", "Massachusetts", f"Current Massachusetts {chamber} roster") for id in ids})
+                links.update({f"MA:{id}": (f"https://malegislature.gov/Legislators/Profile/{id}", "Official Massachusetts profile and contact details", f"Current Massachusetts {chamber} roster") for id in ids})
             except Exception as ex:
                 print(f"MA {chamber} roster unavailable; omitting its links: {ex!r}", file=sys.stderr, flush=True)
     return {"links": links, "checked": datetime.datetime.now(datetime.timezone.utc).date().isoformat()}
@@ -1054,8 +1054,8 @@ def bill_page(r, profiles={}):
         id = r.get("sponsor_profile_id") if r.get("state") else r.get("sponsor_bioguide_id")
         match = profiles.get("links", {}).get(f"{r.get('state') or 'US'}:{id}") if isinstance(id, str) else None
         if match:
-            url, legislature, term = match
-            profile = (f'<br><a href="{e(url)}">Official {e(legislature)} profile and contact details</a>'
+            url, label, term = match
+            profile = (f'<br><a href="{e(url)}">{e(label)}</a>'
                        f'<span class=meta>{e(term)} · roster checked {date(profiles["checked"])}</span>')
         sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}{profile}</dd>"
     history = ""

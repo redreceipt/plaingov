@@ -66,7 +66,7 @@ With feed jobs stopped and `~/plaingov-data/bills` backed up, run `python3 plain
 
 ## Sponsor links
 
-Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them against the [House Clerk](https://clerk.house.gov/xml/lists/MemberData.xml) and [Senate](https://www.senate.gov/general/contact_information/senators_cfm.xml) current-member rosters. Verified matches link to official profiles/contact pages with the roster and check date. The sponsor may not represent the reader.
+Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them against the [House Clerk](https://clerk.house.gov/xml/lists/MemberData.xml) and [Senate](https://www.senate.gov/general/contact_information/senators_cfm.xml) current-member rosters. Verified matches link to official profiles/contact pages with the roster and check date. Senators link to Senate.gov's state contact directory, which lists both senators and their office details; individual senator sites blocked automated verification. The sponsor may not represent the reader.
 
 The state pilot covers Massachusetts House and Senate members. Ingestion reads the explicit Presenter profile link on the official bill page, checks its displayed name against the scraper's sole primary sponsor, and preserves its profile ID. Rebuilds check that ID against the current official chamber directories. Committees, multiple presenters, mismatches and former members stay unlinked. Resolved Open States person IDs are also preserved; name placeholders are not IDs. Other states retain official representative finders, not guessed sponsor profiles.
 
