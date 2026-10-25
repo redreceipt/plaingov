@@ -16,8 +16,9 @@ assert t.startswith("U.S. Congress: word word") and "Funds counselors" not in t,
 url = "https://plaingov.com/us/119-s-4618/"
 t = tweet_text({**rec, "milestone": True})
 assert t.endswith("\n" + url) and len(t) - len(url) + 23 + 1 <= 280, t
-t = tweet_text({**rec, "milestone": True}, link=False, question=True)  # #12 and #14 experiments
-assert "http" not in t and "… Would this affect you?\n\nS. 4618" in t and len(t) + 1 <= 280, t
+t = tweet_text({**rec, "milestone": True}, link=False)  # #12 link experiment; no appended discussion prompt
+assert "http" not in t and "…\n\nS. 4618" in t and len(t) + 1 <= 280, t
+assert "Would this affect you?" not in tweet_text({**rec, "tweet": "Gives states grants."})
 
 # Pages escape model output and link back to their list page.
 p = bill_page(rec)
