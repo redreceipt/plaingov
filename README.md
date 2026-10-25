@@ -66,9 +66,11 @@ With feed jobs stopped and `~/plaingov-data/bills` backed up, run `python3 plain
 
 ## Sponsor links
 
-Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them exactly against the [House Clerk's current roster](https://clerk.house.gov/xml/lists/MemberData.xml), excluding predecessors, vacant seats and future swearing-in dates. Verified matches link to the Clerk's profile/contact page with the Congress number and check date. The sponsor may not represent the reader.
+Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them against the [House Clerk](https://clerk.house.gov/xml/lists/MemberData.xml) and [Senate](https://www.senate.gov/general/contact_information/senators_cfm.xml) current-member rosters. Verified matches link to official profiles/contact pages with the roster and check date. The sponsor may not represent the reader.
 
-This pilot covers current House members only. Missing IDs, former members and roster failures keep plain sponsor names and the existing representative-finder links. Each rebuild with sponsor IDs makes one roster request (10-second timeout); no cached membership, guessed profiles, phone calls or messages. Existing records acquire IDs on their next Congress update; no bulk rewrite or repost is needed.
+The state pilot covers Massachusetts House and Senate members. Ingestion reads the explicit Presenter profile link on the official bill page, checks its displayed name against the scraper's sole primary sponsor, and preserves its profile ID. Rebuilds check that ID against the current official chamber directories. Committees, multiple presenters, mismatches and former members stay unlinked. Resolved Open States person IDs are also preserved; name placeholders are not IDs. Other states retain official representative finders, not guessed sponsor profiles.
+
+Roster failures omit affected links; no cached membership is reused. Rebuilds make up to four public roster requests, only for jurisdictions with sponsor IDs; MA ingestion adds one bill-page request. Each has a 10-second timeout. Existing records acquire IDs on subsequent ingestion; metadata-only rollout enrichment needs no AI rewrite or repost. No calls or messages are sent, and PlainGov collects no addresses.
 
 ## Deploy
 

@@ -284,9 +284,29 @@ def state_id(b):
     return f"states/{b['state'].lower()}/{slug(b['legislative_session'])}-{slug(b['identifier'])}"
 
 
+def ma_sponsor(b):
+    """Keep the official presenter's profile ID, never resolve a name to a person."""
+    people = [s for s in b["sponsorships"] if s["primary"]]
+    if b["state"] != "MA" or len(people) != 1 or people[0].get("entity_type") != "person":
+        return None
+    url = next((s["url"] for s in b["sources"] if re.fullmatch(r"https://malegislature\.gov/Bills/[0-9]+/[A-Za-z0-9]+", s["url"])), None)
+    if not url:
+        return None
+    try:
+        page = fetch(url, timeout=10)
+        presenter = re.search(r"(?s)<dt\b[^>]*>\s*Presenter:\s*</dt>\s*<dd\b[^>]*>(.*?)</dd>", page)
+        links = re.findall(r'<a\b[^>]*href="/Legislators/Profile/([A-Za-z0-9_]+)"[^>]*>(.*?)</a>', presenter[1], re.S) if presenter else []
+        if len(links) == 1 and strip(links[0][1]) == people[0]["name"]:
+            return links[0][0]
+    except Exception as ex:
+        print(f"MA presenter unavailable: {ex!r}", file=sys.stderr, flush=True)
+    return None
+
+
 def state_update(b):
     st, (status, chamber, day) = b["state"], b["status"]
     people = [s for s in b["sponsorships"] if s["primary"]] or b["sponsorships"]
+    person_id = people[0].get("person_id") if people else None
     sponsor = None
     if people:
         lower = "Asm. " if st in ASSEMBLY else "Rep. "
@@ -299,6 +319,8 @@ def state_update(b):
         "id": state_id(b), "where": STATES[st], "state": st, "actions": last_actions(b.get("actions", [])),
         "label": b["identifier"], "resolution": False, "amendment": "constitutional amendment" in b.get("classification", []), "title": b["title"], "official_url": (b["sources"] or [{"url": ""}])[0]["url"],
         "sponsor": sponsor, "date": day, "stage": state_stage(st, status, chamber), "milestone": True, "source": source,
+        "sponsor_profile_id": ma_sponsor(b),
+        "sponsor_person_id": person_id if isinstance(person_id, str) and re.fullmatch(r"ocd-person/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", person_id) else None,
     }
 
 
@@ -941,6 +963,8 @@ def participation(r):
     if not r.get("state"):
         links = [("Find your U.S. representative", "https://www.house.gov/representatives/find-your-representative"),
                  ("Find your U.S. senators", "https://www.senate.gov/senators/senators-contact.htm")]
+    elif r["state"] == "MA":
+        links = [("Find your Massachusetts legislators", "https://malegislature.gov/Search/FindMyLegislator")]
     elif r["state"] == "NY":
         links = [("Find your New York assemblymember", "https://nyassembly.gov/mem/search/"),
                  ("Find your New York state senator", "https://www.nysenate.gov/find-my-senator")]
@@ -977,7 +1001,32 @@ def house_members():
         return {}
 
 
-def bill_page(r, house={}):
+def sponsor_profiles(recs):
+    """Only current official rosters can turn persisted sponsor IDs into links."""
+    import xml.etree.ElementTree as ET
+    links = {}
+    if any(not r.get("state") and r.get("sponsor_bioguide_id") for r in recs):
+        house = house_members()
+        links.update({f"US:{id}": (f"https://clerk.house.gov/members/{id}", "House", f'{ordinal(house["congress"])} Congress') for id in house.get("ids", [])})
+        try:
+            root = ET.fromstring(fetch("https://www.senate.gov/general/contact_information/senators_cfm.xml", timeout=10))
+            senators = {m.findtext("bioguide_id"): m.findtext("website") or "" for m in root.findall("member")}
+            links.update({f"US:{id}": (url, "Senate", "Current Senate roster") for id, url in senators.items()
+                          if re.fullmatch(r"[A-Z][0-9]{6}", id or "") and re.fullmatch(r'https://(?:[a-z0-9-]+\.)+senate\.gov(?:/[^\s<>"\']*)?', url)})
+        except Exception as ex:
+            print(f"Senate roster unavailable; omitting Senate links: {ex!r}", file=sys.stderr, flush=True)
+    if any(r.get("state") == "MA" and r.get("sponsor_profile_id") for r in recs):
+        for chamber in ("House", "Senate"):
+            try:
+                page = fetch(f"https://malegislature.gov/Legislators/Members/{chamber}", timeout=10)
+                ids = re.findall(r'<a\b[^>]*href="/Legislators/Profile/([A-Za-z0-9_]+)"', page)
+                links.update({f"MA:{id}": (f"https://malegislature.gov/Legislators/Profile/{id}", "Massachusetts", f"Current Massachusetts {chamber} roster") for id in ids})
+            except Exception as ex:
+                print(f"MA {chamber} roster unavailable; omitting its links: {ex!r}", file=sys.stderr, flush=True)
+    return {"links": links, "checked": datetime.datetime.now(datetime.timezone.utc).date().isoformat()}
+
+
+def bill_page(r, profiles={}):
     st = r["stage"]
     if r.get("amendment"):
         track = "<p>This proposes a constitutional amendment. Legislative approval alone does not change the constitution.</p>"
@@ -1002,10 +1051,12 @@ def bill_page(r, house={}):
     sponsor = ""
     if r.get("sponsor"):
         profile = ""
-        bioguide = r.get("sponsor_bioguide_id")
-        if not r.get("state") and isinstance(bioguide, str) and bioguide in house.get("ids", set()):
-            profile = (f'<br><a href="https://clerk.house.gov/members/{bioguide}">Official House profile and contact details</a>'
-                       f'<span class=meta>{ordinal(house["congress"])} Congress · roster checked {date(house["checked"])}</span>')
+        id = r.get("sponsor_profile_id") if r.get("state") else r.get("sponsor_bioguide_id")
+        match = profiles.get("links", {}).get(f"{r.get('state') or 'US'}:{id}") if isinstance(id, str) else None
+        if match:
+            url, legislature, term = match
+            profile = (f'<br><a href="{e(url)}">Official {e(legislature)} profile and contact details</a>'
+                       f'<span class=meta>{e(term)} · roster checked {date(profiles["checked"])}</span>')
         sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}{profile}</dd>"
     history = ""
     if len(r["updates"]) > 1:
@@ -1064,9 +1115,9 @@ NOT_FOUND = """<h1>Hmm, that page doesn't exist.</h1>
 def build_site():
     site = f"{DATA}/site"
     recs = [json.load(open(p)) for p in glob.glob(f"{DATA}/bills/**/*.json", recursive=True)]
-    house = house_members() if any(not r.get("state") and r.get("sponsor_bioguide_id") for r in recs) else {}
+    profiles = sponsor_profiles(recs)
     for r in recs:
-        write(f"{site}/{r['id']}/index.html", bill_page(r, house))
+        write(f"{site}/{r['id']}/index.html", bill_page(r, profiles))
     us = [r for r in recs if not r.get("state")]
     states = [r for r in recs if r.get("state")]
     week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))

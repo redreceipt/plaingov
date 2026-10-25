@@ -111,6 +111,7 @@ try:
     house = plaingov.house_members()
     assert house["ids"] == {"K000389"} and house["congress"] == 119
     assert requests == [("https://clerk.house.gov/xml/lists/MemberData.xml", {"timeout": 10})]
+    house = plaingov.sponsor_profiles([current])
     p = bill_page(current, house)
     assert 'href="https://clerk.house.gov/members/K000389"' in p and "119th Congress · roster checked" in p
     assert "Rep. Ro Khanna (D-CA)" in p and "The sponsor may not represent you" in p
@@ -140,6 +141,7 @@ assert "&lt;script&gt;bad&lt;/script&gt;" in p and "<script>" not in p
 p = plaingov.participation({**rec, "state": "AK"})
 assert "usa.gov/elected-officials" in p and "house.gov/" not in p
 assert "<form" not in p and "<input" not in p and "mailto:" not in p
+assert "https://malegislature.gov/Search/FindMyLegislator" in plaingov.participation({**rec, "state": "MA"})
 
 # State milestones come from Open States action classifications.
 UP, LOW, GOV = '~{"classification": "upper"}', '~{"classification": "lower"}', '~{"classification": "executive"}'
@@ -173,6 +175,57 @@ s = state_update(SC_BILL)
 assert (s["id"], s["label"], s["sponsor"], s["stage"]["short"]) == ("states/sc/2025-2026-h-3305", "H 3305", "Rep. Newton and 1 other", "It's law"), s
 assert state_update({**SC_BILL, "classification": ["constitutional amendment"]})["amendment"]
 assert state_update({**SC_BILL, "state": "CA"})["sponsor"] == "Asm. Newton and 1 other"  # lower chamber is the Assembly
+
+# Official Senate IDs and MA presenter links are rechecked against current rosters.
+ma_bill = {**SC_BILL, "state": "MA", "sources": [{"url": "https://malegislature.gov/Bills/194/H3104"}],
+           "sponsorships": [{"name": "Colleen M. Garry", "primary": True, "entity_type": "person", "person_id": '~{"name":"Colleen M. Garry"}'}]}
+presenter = '<dt class="label">Presenter:</dt><dd><a href="/Legislators/Profile/CMG1">Colleen M. Garry</a></dd>'
+senator = '<contact_information><member><bioguide_id>S001150</bioguide_id><website>https://www.schiff.senate.gov/</website></member></contact_information>'
+original_fetch = plaingov.fetch
+try:
+    plaingov.fetch = lambda *a, **k: presenter
+    assert plaingov.ma_sponsor(ma_bill) == "CMG1"
+    assert state_update(ma_bill)["sponsor_profile_id"] == "CMG1"
+    assert state_update(ma_bill)["sponsor_person_id"] is None, "unresolved scraper names are not person IDs"
+    person = "ocd-person/12345678-1234-1234-1234-123456789abc"
+    assert state_update({**ma_bill, "sponsorships": [{**ma_bill['sponsorships'][0], "person_id": person}]})["sponsor_person_id"] == person
+    assert plaingov.ma_sponsor({**ma_bill, "sponsorships": ma_bill["sponsorships"] * 2}) is None
+    assert plaingov.ma_sponsor({**ma_bill, "sources": [{"url": "https://evil.test/Bills/194/H3104"}]}) is None
+    for invalid in (presenter.replace("Presenter:", "Petitioners:"), presenter.replace("Garry", "Other"),
+                    presenter.replace("/Legislators/Profile/CMG1", "https://evil.test/CMG1"), presenter.replace("CMG1", "../CMG1")):
+        plaingov.fetch = lambda *a, **k: invalid
+        assert plaingov.ma_sponsor(ma_bill) is None
+    ma_rec = {**rec, "state": "MA", "sponsor_profile_id": "CMG1"}
+    senate_rec = {**rec, "sponsor_bioguide_id": "S001150"}
+    def official_fetch(url, **kwargs):
+        assert kwargs["timeout"] == 10
+        if "clerk.house.gov" in url: return roster
+        if "senate.gov/general" in url: return senator
+        if url.endswith("/House"): return '<a href="/Legislators/Profile/CMG1">Garry</a>'
+        return '<a href="/Legislators/Profile/MJR0">Senator</a>'
+    plaingov.fetch = official_fetch
+    profiles = plaingov.sponsor_profiles([current, senate_rec, ma_rec])
+    assert "Official Senate profile" in bill_page(senate_rec, profiles)
+    assert "https://www.schiff.senate.gov/" in bill_page(senate_rec, profiles)
+    assert "Official Massachusetts profile" in bill_page(ma_rec, profiles)
+    assert "MA:MJR0" in profiles["links"], "both state chambers"
+    assert "Official Massachusetts profile" not in bill_page({**ma_rec, "sponsor_profile_id": "FORMER"}, profiles)
+    assert "Official Massachusetts profile" not in bill_page({**ma_rec, "state": "CA"}, profiles)
+    for bad_url in ("javascript:alert(1)", "https://senate.gov.evil.test/", "https://evil@www.schiff.senate.gov/", "http://www.schiff.senate.gov/"):
+        plaingov.fetch = lambda url, **k: senator.replace("https://www.schiff.senate.gov/", bad_url) if "senate.gov/general" in url else official_fetch(url, **k)
+        assert "US:S001150" not in plaingov.sponsor_profiles([senate_rec])["links"]
+    def fail_senate(url, **kwargs):
+        if "senate.gov/general" in url: raise TimeoutError("test outage")
+        return official_fetch(url, **kwargs)
+    plaingov.fetch = fail_senate
+    assert "US:K000389" in plaingov.sponsor_profiles([current, senate_rec])["links"], "failures stay isolated"
+    plaingov.fetch = unavailable
+    assert plaingov.ma_sponsor(ma_bill) is None
+    assert not plaingov.sponsor_profiles([current, senate_rec, ma_rec])["links"]
+    plaingov.fetch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("unnecessary roster request"))
+    assert not plaingov.sponsor_profiles([rec])["links"]
+finally:
+    plaingov.fetch = original_fetch
 
 law = {**rec, "id": "a", "stage": us_stage("Public Law")}
 html = by_stage([rec, law], False)
