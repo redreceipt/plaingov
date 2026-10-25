@@ -158,7 +158,7 @@ def congress_update(b):
         "id": f"us/{b['congress']}-{t.lower()}-{b['number']}", "where": "U.S. Congress", "state": None,
         "label": f"{label} {b['number']}", "resolution": t in RESOLUTIONS, "title": b["title"],
         "official_url": f"https://www.congress.gov/bill/{ordinal(b['congress'])}-congress/{slug}/{b['number']}",
-        "sponsor": sponsor_name(sponsors[0].get("fullName")), "date": a["actionDate"], "stage": st,
+        "sponsor": sponsor_name(sponsors[0].get("fullName")), "sponsor_id": sponsors[0].get("bioguideId"), "date": a["actionDate"], "stage": st,
         "milestone": st["step"] >= 1, "source": " ".join(x for x in (b["title"], crs, text) if x)[:SOURCE_CHARS],
         "actions": [f"{a['actionDate']}: {a['text']}"],
     }
@@ -870,6 +870,26 @@ def by_stage(recs, where):
     return out or "<p>Nothing new here yet. We check every day, so come back soon.</p>"
 
 
+def participation(r):
+    """Official lookup tools, not guessed districts or automatically sent messages."""
+    if not r.get("state"):
+        links = [("Find your U.S. representative", "https://www.house.gov/representatives/find-your-representative"),
+                 ("Find your U.S. senators", "https://www.senate.gov/senators/senators-contact.htm")]
+    elif r["state"] == "NY":
+        links = [("Find your New York assemblymember", "https://nyassembly.gov/mem/search/"),
+                 ("Find your New York state senator", "https://www.nysenate.gov/find-my-senator")]
+    else:
+        links = [("Find your state representatives through USA.gov", "https://www.usa.gov/elected-officials")]
+    details = f"{r['where']} · {r['label']}\n{r['title']}\n{r['official_url']}"
+    return ('<section id="participate"><h2>Contact your representatives</h2>'
+            '<p>The sponsor may not represent you. Use these official tools to find your own representatives and their contact information.</p>'
+            '<ul>' + "".join(f'<li><a href="{url}">{label}</a></li>' for label, url in links) + '</ul>'
+            '<details><summary>Bill details to include in your message</summary>'
+            '<p>Copy these details, then add your question or views in your own words.</p>'
+            f'<p style="white-space:pre-wrap;overflow-wrap:anywhere">{e(details)}</p></details>'
+            '<p class=meta>These links open government websites. PlainGov does not collect your address or send messages for you.</p></section>')
+
+
 def bill_page(r):
     st = r["stage"]
     if r["resolution"]:
@@ -891,7 +911,10 @@ def bill_page(r):
         explain += "<p class=meta>So far we only have this bill's official title and description, so there isn't more to explain yet. The full bill is linked below.</p>"
     record = "".join(f"<li>{e(a)}</li>" for a in reversed(r.get("actions") or []))
     record = f"<p class=meta>From the official record:</p><ul class=meta>{record}</ul>" if record else ""
-    sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}</dd>" if r.get("sponsor") else ""
+    name = e(r.get("sponsor") or "")
+    if not r.get("state") and re.fullmatch(r"[A-Z]\d{6}", r.get("sponsor_id") or ""):
+        name = f'<a href="https://bioguide.congress.gov/search/bio/{r["sponsor_id"]}">{name}</a>'
+    sponsor = f"<dt>Who proposed it</dt><dd>{name}</dd>" if r.get("sponsor") else ""
     history = ""
     if len(r["updates"]) > 1:
         history = "<h2>How it got here</h2><ul class=list>" + "".join(
@@ -908,6 +931,7 @@ def bill_page(r):
 <h2>The basics</h2>
 <dl><dt>Bill number</dt><dd>{e(r['label'])}</dd><dt>Official name</dt><dd>{e(r['title'])}</dd>{sponsor}</dl>
 {history}
+{participation(r)}
 <a class=official href="{e(r['official_url'])}">Read the full bill on {e(host)} →</a>{credit}"""
     return page(f"{r['headline']} · PlainGov", r["summary"], body, r["id"] + "/")
 
