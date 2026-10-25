@@ -1215,18 +1215,29 @@ METRICS = ["impression_count", "like_count", "reply_count", "retweet_count", "qu
 
 
 def report_text(rows):
-    """Weekly summary: totals, medians by group, and the top posts."""
+    """Descriptive lifetime snapshots, with coverage counts instead of fabricated zeroes."""
     if not rows:
         return "No posts in the last 7 days."
-    out = [f"{len(rows)} posts. Totals: " + ", ".join(f"{m.removesuffix('_count')} {sum(r.get(m, 0) for r in rows)}" for m in METRICS), "",
-           "Median impressions / likes / replies / profile clicks per post:"]
+
+    def metric(rs, name, aggregate):
+        values = [r[name] for r in rs if r.get(name) is not None]
+        value = f"{aggregate(values):g}" if values else "n/a"
+        return f"{value} (n={len(values)}/{len(rs)})"
+
+    eligible = [r for r in rows if r.get("milestone") is True]
+    out = [f"{len(rows)} posts. Totals: " + ", ".join(f"{m.removesuffix('_count')} {metric(rows, m, sum)}" for m in METRICS),
+           "Lifetime metrics at different post ages; descriptive only, not an experiment result.",
+           f"Link groups: {len(eligible)}/{len(rows)} posts known to be milestone-eligible at publication; others excluded.", "",
+           "Median impressions / likes / replies / profile clicks per post (n=available/group size):"]
     for group in ("stage", "where", "link", "question", "hours_et"):
-        for value in sorted({str(r[group]) for r in rows}):
-            rs = [r for r in rows if str(r[group]) == value]
-            med = lambda m: statistics.median(r.get(m, 0) for r in rs)
-            out.append(f"  {group} {value} ({len(rs)}): {med('impression_count')} / {med('like_count')} / {med('reply_count')} / {med('user_profile_clicks')}")
-    out += ["", "Top posts:"] + [f"  {r.get('impression_count', 0)} impressions, {r.get('like_count', 0)} likes: {r['bill']} https://x.com/plaingov/status/{r['id']}"
-                                 for r in sorted(rows, key=lambda r: -r.get("impression_count", 0))[:3]]
+        cohort = eligible if group == "link" else rows
+        for value in sorted({str(r.get(group, "unknown")) for r in cohort}):
+            rs = [r for r in cohort if str(r.get(group, "unknown")) == value]
+            out.append(f"  {group} {value} ({len(rs)}): " + " / ".join(metric(rs, m, statistics.median)
+                       for m in ("impression_count", "like_count", "reply_count", "user_profile_clicks")))
+    measured = [r for r in rows if r.get("impression_count") is not None]
+    out += ["", "Top posts with available impressions:"] + [f"  {r['impression_count']} impressions, {metric([r], 'like_count', sum)} likes: {r['bill']} https://x.com/plaingov/status/{r['id']}"
+                                 for r in sorted(measured, key=lambda r: -r["impression_count"])[:3]]
     return "\n".join(out)
 
 
@@ -1239,14 +1250,17 @@ def report():
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7 * 86400))
     tweets = x_api("GET", f"https://api.x.com/2/users/{me}/tweets", {"start_time": since, "max_results": "100",
                    "tweet.fields": "created_at,public_metrics,non_public_metrics"}).get("data", [])
-    bills = {p["tweet"]: p["id"] for p in load(f"{DATA}/state/posts.json", [])}
-    rows = []
+    posts = {p["tweet"]: p for p in load(f"{DATA}/state/posts.json", [])}
+    rows, observed_at = [], time.time()
     for t in tweets:
-        rec = load(f"{DATA}/bills/{bills.get(t['id'], '-')}.json", None) or {"stage": {}}
+        posted = posts.get(t["id"], {})
+        bill = posted.get("id", "not ours")
         hour = datetime.datetime.fromisoformat(t["created_at"].replace("Z", "+00:00")).astimezone(zoneinfo.ZoneInfo("America/New_York")).hour
-        rows.append({"id": t["id"], "bill": bills.get(t["id"], "not ours"), "stage": rec["stage"].get("short", "?"),
-                     "where": "state" if rec.get("state") else "federal", "link": "t.co/" in t["text"],
-                     "question": "Would this affect you?" in t["text"], "hours_et": f"{hour // 6 * 6:02d}-{hour // 6 * 6 + 6:02d}", **t.get("public_metrics", {}), **t.get("non_public_metrics", {})})
+        rows.append({"id": t["id"], "bill": bill, "stage": posted.get("stage", "unknown"), "milestone": posted.get("milestone"),
+                     "where": posted.get("where", "state" if bill.startswith("states/") else "federal" if bill.startswith("us/") else "unknown"),
+                     "link": posted.get("link", "t.co/" in t["text"]), "question": posted.get("question", "Would this affect you?" in t["text"]),
+                     "text": t["text"], "created_at": t["created_at"], "observed_at": observed_at,
+                     "hours_et": f"{hour // 6 * 6:02d}-{hour // 6 * 6 + 6:02d}", **t.get("public_metrics", {}), **t.get("non_public_metrics", {})})
     day = time.strftime("%Y-%m-%d")
     write(f"{DATA}/state/reports/{day}.json", json.dumps(rows, indent=1))
     text = report_text(rows)
@@ -1295,10 +1309,13 @@ def post_best():
     else:
         rec = load(f"{DATA}/bills/{best['id']}.json", None)
         n, testing = len(log), time.strftime("%Y-%m-%d") < EXPERIMENTS_UNTIL
-        text = tweet_text(rec, link=not testing or n % 2 == 0)
+        link = rec["milestone"] and (not testing or n % 2 == 0)
+        text = tweet_text(rec, link=link)
         tid = "dry-run" if DRY_RUN else post_x(text)["data"]["id"]
         print(f"--- {'DRY RUN ' if DRY_RUN else ''}post {best['id']} (interest {best['interest']})\n{text}", flush=True)
-        log.append({"at": now, "id": best["id"], "tweet": tid})
+        log.append({"at": now, "id": best["id"], "tweet": tid, "text": text, "stage": rec["stage"]["short"],
+                    "where": "state" if rec.get("state") else "federal", "milestone": rec["milestone"], "link": link,
+                    "question": "Would this affect you?" in text})
         write(lpath, json.dumps(log[-500:]))
         queue = [q for q in queue if q["id"] != best["id"]]
         why = "posted"
