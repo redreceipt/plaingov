@@ -62,7 +62,7 @@ After every state scrape, `health.json` records status, bill counts, and errors,
 
 ## Status repairs
 
-With feed jobs stopped and `~/plaingov-data/bills` backed up, run `python3 plaingov.py restage` after deploying a status fix. It corrects saved status fields and rebuilds pages without changing the posting queue. This preserves explanatory prose and marks corrected records for `refresh`. Review affected summaries against the official source and refresh them before relying on them; refresh uses the existing AI services. Unknown action chambers have no guessed next step. Alaska legislative resolves and explicitly identified constitutional amendment proposals do not use the law tracker.
+With feed jobs stopped and `~/plaingov-data/bills` backed up, run `python3 plaingov.py restage` after deploying a status fix. It corrects saved status fields and rebuilds pages without changing the posting queue. This preserves explanatory prose and marks corrected records for `refresh`. Review affected summaries against the official source and refresh them before relying on them; refresh uses the existing AI services. Unknown action chambers have no guessed next step. Alaska legislative resolves, California joint resolutions and explicitly identified constitutional amendment proposals do not use the law tracker. California's [Assembly Chief Clerk glossary](https://clerk.assembly.ca.gov/glossary-terms) confirms joint resolutions have no force of law and need no Governor's signature; this rule does not apply to other jurisdictions. Known resolution/amendment classifications survive backup-feed updates.
 
 ## Deploy
 

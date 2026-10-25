@@ -68,6 +68,19 @@ assert r["updates"][-1]["now"] == r["stage"]["now"] and not r["stage"]["next"]
 before = json.dumps(r)
 assert json.dumps(plaingov.normalize_stage(r)) == before, "repair is idempotent"
 
+# California joint resolutions express opinions, including when recorded as chaptered.
+# https://clerk.assembly.ca.gov/glossary-terms (Joint Resolution; Resolution)
+for label in ("AJR31", "SJR 1"):
+    for status in (2, 3, 4):
+        r = plaingov.normalize_stage({**rec, "state": "CA", "label": label, "stage": state_stage("CA", status, "lower"), "updates": []})
+        assert r["resolution"] and r["stage"]["step"] < 3 and not r["stage"]["next"]
+        assert r["stage"]["short"] == ("Passed the Assembly" if status == 2 else "Adopted")
+        assert "<ol class=tracker>" not in bill_page(r) and "It's law" not in tweet_text(r)
+        assert "<h2>Resolutions</h2>" in by_stage([r], False) and "<h2>New laws</h2>" not in by_stage([r], False)
+for state, label in (("CA", "AB 1"), ("NJ", "SJR 1")):
+    r = plaingov.normalize_stage({**rec, "state": state, "label": label, "stage": state_stage(state, 4), "updates": []})
+    assert not r["resolution"] and r["stage"]["step"] == 3, "do not apply California rules to bills or other states"
+
 assert sponsor_name("Rep. Smith, John [R-TX-5]") == "Rep. John Smith (R-TX)"
 
 # Contact links stay official and do not collect addresses or send messages.
@@ -243,4 +256,25 @@ plaingov.restage()
 assert open(path).read() == before
 assert json.load(open(f"{plaingov.DATA}/state/queue.json")) == [{"id": "keep-me"}]
 assert not os.path.exists(f"{plaingov.DATA}/state/posts.json")
+# Backup feeds must retain a known instrument before rewriting, even without its old title/action evidence.
+original_rewrite = plaingov.rewrite
+seen = []
+plaingov.rewrite = lambda r: seen.append(json.loads(json.dumps(r))) or {"summary": "Checked explanation"}
+try:
+    for flag, short in (("amendment", "Passed lawmakers"), ("resolution", "Adopted")):
+        saved = {**rec, "id": f"states/ak/backup-{flag}", "state": "AK", "label": "HJR 1", "title": "Legislative proposal",
+                 "amendment": False, "resolution": False, flag: True, "source": "Official proposal", "updates": [], "v": plaingov.PROMPT_VERSION}
+        plaingov.write(f"{plaingov.DATA}/bills/{saved['id']}.json", json.dumps(saved))
+        incoming = {k: v for k, v in saved.items() if k not in ("amendment", "updates", "v")}
+        incoming.update(resolution=False, stage=state_stage("AK", 4))
+        fixed = plaingov.save(incoming)
+        assert seen[-1][flag] and seen[-1]["stage"]["short"] == short, "rewrite needs saved instrument context"
+        assert fixed[flag] and fixed["stage"]["short"] == short and fixed["updates"][-1]["short"] == short
+        assert "<ol class=tracker>" not in bill_page(fixed) and "It's law" not in tweet_text(fixed)
+        before = len(seen)
+        plaingov.save({**incoming, "resolution": False, "stage": state_stage("AK", 4)})
+        assert len(seen) == before, "equivalent backup updates should not trigger another rewrite"
+finally:
+    plaingov.rewrite = original_rewrite
+assert json.load(open(f"{plaingov.DATA}/state/queue.json")) == [{"id": "keep-me"}]
 print("ok")
