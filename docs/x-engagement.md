@@ -1,6 +1,6 @@
 # What drives engagement on X for @plaingov
 
-Findings for #6 and #7, October 2026. Sources: X's published For You ranker ([xai-org/x-algorithm](https://github.com/xai-org/x-algorithm), `home-mixer/params/param.rs`, updated Sept 2026), X's [Automation Rules](https://help.x.com/en/rules-and-policies/x-automation), [developer guidelines](https://docs.x.com/developer-guidelines), and [API pricing](https://docs.x.com/x-api/getting-started/pricing). We have no engagement data of our own yet, so everything below is a hypothesis to measure. #10 adds the measuring.
+Findings for #6 and #7, October 2026. Sources: X's published For You ranker ([xai-org/x-algorithm](https://github.com/xai-org/x-algorithm), `home-mixer/params/param.rs`, updated Sept 2026), X's [Automation Rules](https://help.x.com/en/rules-and-policies/x-automation), [developer guidelines](https://docs.x.com/developer-guidelines), and [API pricing](https://docs.x.com/x-api/getting-started/pricing). The saved October 24 report has 3 posts and 7 total impressions: too little evidence to choose a format. The ranking interpretations below remain hypotheses, not measured results for PlainGov.
 
 ## How X ranks a post
 
@@ -29,6 +29,12 @@ Findings for #6 and #7, October 2026. Sources: X's published For You ranker ([xa
 ## Editorial direction
 
 Lead with who is affected and the concrete change, preserving conditions and proposal/law status. No manufactured discussion questions, reaction prompts, or invented tradeoffs. The link experiment (#12) continues through November 7; #13 tracks the separate image trial. Historical question posts remain in reports so results are not relabeled.
+
+## Report limits
+
+New posts retain their publication-time stage, milestone eligibility, link/question treatment and exact copy. Reports use that snapshot, not the bill's current stage. Older posts without a snapshot have unknown stage/eligibility; they stay in historical totals but are excluded from link groups. Link groups include only known milestone-eligible posts.
+
+Metrics include availability counts (`n=available/group size`); missing values are `n/a`, not zero. Reports save creation and observation times, but still contain lifetime metrics at different post ages. They are descriptive, not an equal-age comparison or evidence of a winning treatment. Fixed-age measurement and the link decision remain follow-up work in #44 before November 8. Public impressions do not establish payout eligibility (#42).
 
 ## Also check
 

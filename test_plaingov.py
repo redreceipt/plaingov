@@ -225,11 +225,18 @@ p = bill_page({**rec, "details": ["Under 21 days old."], "changes": "Adds drop b
                "happened": "The Governor signed it on September 9, 2026.", "actions": ["2026-09-09: SIGNED INTO LAW"], "limited": True})
 assert all(x in p for x in ("<h2>What it does</h2><ul><li>Under 21 days old.", "What changes", "September 10, 2026", "only have this bill's official title",
                             "The Governor signed it on September 9, 2026.", "<li>2026-09-09: SIGNED INTO LAW</li>")), p
-# The weekly X report totals metrics and compares groups (e.g. link vs no link) by median.
-rows = [{"id": "1", "bill": "us/a", "stage": "It's law", "where": "federal", "link": True, "question": False, "hours_et": "06-12", "impression_count": 100, "like_count": 3},
-        {"id": "2", "bill": "states/x", "stage": "Passed the Senate", "where": "state", "link": False, "question": True, "hours_et": "18-24", "impression_count": 40}]
+# Missing metrics stay unavailable; only known milestone posts enter link groups.
+rows = [{"id": "1", "bill": "us/a", "stage": "It's law", "where": "federal", "milestone": True, "link": True, "question": False, "hours_et": "06-12", "impression_count": 100, "like_count": 3},
+        {"id": "2", "bill": "states/x", "stage": "Passed the Senate", "where": "state", "milestone": True, "link": False, "question": True, "hours_et": "18-24", "impression_count": 40}]
 t = report_text(rows)
-assert "2 posts. Totals: impression 140, like 3" in t and "link True (1): 100 / 3 / 0 / 0" in t and t.index("status/1") < t.index("status/2"), t
+assert "2 posts. Totals: impression 140 (n=2/2), like 3 (n=1/2)" in t and "link True (1): 100 (n=1/1) / 3 (n=1/1) / n/a (n=0/1)" in t, t
+assert t.index("status/1") < t.index("status/2") and "not an experiment result" in t
+mixed = rows + [{**rows[1], "id": "3", "milestone": False, "like_count": 0, "impression_count": 0},
+                {**rows[1], "id": "4", "milestone": None, "like_count": None, "impression_count": None}]
+t = report_text(mixed)
+assert "like 3 (n=2/4)" in t and "Link groups: 2/4" in t and "link False (1)" in t and "status/4" not in t
+assert "url_link_clicks n/a (n=0/4)" in t and "0 impressions, 0 (n=1/1) likes" in t
+assert "Link groups: 0/2" in report_text([{k: v for k, v in r.items() if k != "milestone"} for r in rows])
 assert report_text([]) == "No posts in the last 7 days."
 # Posts go out during U.S. daytime (8am-9pm Eastern), DST included.
 assert posting_hours(1792846800) and not posting_hours(1792803600)  # 9am Oct 24 vs 9pm Oct 23, 2026 (EDT)
@@ -277,4 +284,39 @@ try:
 finally:
     plaingov.rewrite = original_rewrite
 assert json.load(open(f"{plaingov.DATA}/state/queue.json")) == [{"id": "keep-me"}]
+# Save publication context, then report it without consulting the bill's newer stage.
+original_time, original_x_api, original_dry_run = plaingov.time.time, plaingov.x_api, plaingov.DRY_RUN
+original_end = plaingov.EXPERIMENTS_UNTIL
+try:
+    now = 1792846800  # within posting hours
+    plaingov.time.time = lambda: now
+    plaingov.DRY_RUN, plaingov.EXPERIMENTS_UNTIL = True, "9999-01-01"
+    path = f"{plaingov.DATA}/bills/{rec['id']}.json"
+    for milestone, previous, linked in ((False, [], False), (True, [{"at": 0, "id": "old", "tweet": "old"}], False), (True, [], True)):
+        published_stage = us_stage("Passed House") if milestone else rec["stage"]
+        plaingov.write(path, json.dumps({**rec, "milestone": milestone, "stage": published_stage}))
+        plaingov.write(f"{plaingov.DATA}/state/posts.json", json.dumps(previous))
+        plaingov.write(f"{plaingov.DATA}/state/queue.json", json.dumps([{"id": rec['id'], "at": now, "interest": 4}]))
+        plaingov.post_best()
+        posted = json.load(open(f"{plaingov.DATA}/state/posts.json"))[-1]
+        assert posted["stage"] == published_stage["short"] and posted["milestone"] == milestone and posted["link"] == linked
+        assert posted["where"] == "federal" and not posted["question"] and ("https://plaingov.com/" in posted["text"]) == linked
+    plaingov.write(path, json.dumps({**rec, "stage": us_stage("Public Law")}))
+    plaingov.write(f"{plaingov.DATA}/state/posts.json", json.dumps([posted, {"at": now, "id": rec['id'], "tweet": "legacy"}]))
+    plaingov.write(f"{plaingov.DATA}/state/x.json", '{"id":"self"}')
+    def report_api(method, url, params):
+        assert method == "GET" and url.endswith("/self/tweets")
+        return {"data": [{"id": ident, "text": text, "created_at": "2026-10-24T13:00:00Z", "public_metrics": {"impression_count": 0}}
+                         for ident, text in (("dry-run", posted["text"]), ("legacy", "Old copy. Would this affect you?"), ("external", "Manual post"))]}
+    plaingov.x_api = report_api
+    plaingov.report()
+    result = json.load(open(f"{plaingov.DATA}/state/reports/{time.strftime('%Y-%m-%d')}.json"))
+    assert result[0]["stage"] == "Passed the House" and result[0]["milestone"] is True and result[0]["link"] is True
+    assert result[1]["stage"] == "unknown" and result[1]["milestone"] is None and result[1]["question"] is True
+    assert result[2]["where"] == "unknown" and result[2]["bill"] == "not ours"
+    assert result[0]["observed_at"] == now and result[0]["created_at"] == "2026-10-24T13:00:00Z"
+    assert "like_count" not in result[0] and result[0]["impression_count"] == 0
+finally:
+    plaingov.time.time, plaingov.x_api, plaingov.DRY_RUN = original_time, original_x_api, original_dry_run
+    plaingov.EXPERIMENTS_UNTIL = original_end
 print("ok")
