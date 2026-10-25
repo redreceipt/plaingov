@@ -35,12 +35,9 @@ assert us_stage("Became Public Law No: 119-45.")["step"] == 3 and us_stage("Read
 assert sponsor_name("Rep. Smith, John [R-TX-5]") == "Rep. John Smith (R-TX)"
 
 # Contact links stay official and do not collect addresses or send messages.
-p = bill_page({**rec, "sponsor_id": "J000298"})
-assert 'https://bioguide.congress.gov/search/bio/J000298' in p
+p = bill_page(rec)
 assert 'id="participate"' in p and "house.gov/representatives/find-your-representative" in p and "senate.gov/senators/senators-contact.htm" in p
 assert "The sponsor may not represent you" in p and "School Counseling Act" in p
-assert "bioguide.congress.gov" not in bill_page({**rec, "sponsor_id": 'J000298" onclick="alert(1)'})
-assert "bioguide.congress.gov" not in bill_page({**rec, "state": "NY", "sponsor_id": "J000298"})
 p = plaingov.participation({**rec, "state": "NY", "title": "<script>bad</script>"})
 assert "nyassembly.gov/mem/search/" in p and "nysenate.gov/find-my-senator" in p
 assert "&lt;script&gt;bad&lt;/script&gt;" in p and "<script>" not in p

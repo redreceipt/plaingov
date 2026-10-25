@@ -158,7 +158,7 @@ def congress_update(b):
         "id": f"us/{b['congress']}-{t.lower()}-{b['number']}", "where": "U.S. Congress", "state": None,
         "label": f"{label} {b['number']}", "resolution": t in RESOLUTIONS, "title": b["title"],
         "official_url": f"https://www.congress.gov/bill/{ordinal(b['congress'])}-congress/{slug}/{b['number']}",
-        "sponsor": sponsor_name(sponsors[0].get("fullName")), "sponsor_id": sponsors[0].get("bioguideId"), "date": a["actionDate"], "stage": st,
+        "sponsor": sponsor_name(sponsors[0].get("fullName")), "date": a["actionDate"], "stage": st,
         "milestone": st["step"] >= 1, "source": " ".join(x for x in (b["title"], crs, text) if x)[:SOURCE_CHARS],
         "actions": [f"{a['actionDate']}: {a['text']}"],
     }
@@ -911,10 +911,7 @@ def bill_page(r):
         explain += "<p class=meta>So far we only have this bill's official title and description, so there isn't more to explain yet. The full bill is linked below.</p>"
     record = "".join(f"<li>{e(a)}</li>" for a in reversed(r.get("actions") or []))
     record = f"<p class=meta>From the official record:</p><ul class=meta>{record}</ul>" if record else ""
-    name = e(r.get("sponsor") or "")
-    if not r.get("state") and re.fullmatch(r"[A-Z]\d{6}", r.get("sponsor_id") or ""):
-        name = f'<a href="https://bioguide.congress.gov/search/bio/{r["sponsor_id"]}">{name}</a>'
-    sponsor = f"<dt>Who proposed it</dt><dd>{name}</dd>" if r.get("sponsor") else ""
+    sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}</dd>" if r.get("sponsor") else ""
     history = ""
     if len(r["updates"]) > 1:
         history = "<h2>How it got here</h2><ul class=list>" + "".join(
