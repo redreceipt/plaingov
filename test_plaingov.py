@@ -319,4 +319,74 @@ try:
 finally:
     plaingov.time.time, plaingov.x_api, plaingov.DRY_RUN = original_time, original_x_api, original_dry_run
     plaingov.EXPERIMENTS_UNTIL = original_end
+# The hourly sampler uses a bounded age window, real API timestamps and immutable observations.
+original_time, original_x_api = plaingov.time.time, plaingov.x_api
+original_post_best, original_report = plaingov.post_best, plaingov.report
+try:
+    now = 1792846800
+    plaingov.time.time = lambda: now
+    sample_path = f"{plaingov.DATA}/state/metrics-24h.json"
+    entries = [{"at": now - age * 3600, "id": rec["id"], "tweet": ident, "stage": "Passed the House", "milestone": True, "link": False}
+               for ident, age in (("young", 23.99), ("first", 24), ("last", 25.99), ("expired", 26),
+                                  ("dry-run", 25), ("api-young", 25), ("api-expired", 25), ("missing", 25))]
+    plaingov.write(f"{plaingov.DATA}/state/posts.json", json.dumps(entries))
+    queue_before = open(f"{plaingov.DATA}/state/queue.json").read()
+    requests = []
+    def sample_api(method, url, params):
+        assert method == "GET" and url == "https://api.x.com/2/tweets"
+        ids = params["ids"].split(",")
+        requests.append(ids)
+        assert len(ids) <= 100 and not {"young", "expired", "dry-run"} & set(ids)
+        return {"data": [{"id": ident, "text": "Published copy", "public_metrics": {"impression_count": len(requests)},
+                          "created_at": plaingov.datetime.datetime.fromtimestamp(now - {"first": 24, "last": 25.99, "api-young": 23.99, "api-expired": 26}.get(ident, 25) * 3600,
+                              plaingov.datetime.timezone.utc).isoformat()}
+                         for ident in ids if ident != "missing" or len(requests) > 1]}
+    plaingov.x_api = sample_api
+    plaingov.sample_metrics()
+    first_samples = json.load(open(sample_path))
+    assert [r["id"] for r in first_samples] == ["first", "last"]
+    assert [round(r["age_hours"], 2) for r in first_samples] == [24, 25.99]
+    plaingov.sample_metrics()
+    samples = json.load(open(sample_path))
+    assert samples[:2] == first_samples and samples[-1]["id"] == "missing"
+    assert requests[-1] == ["api-young", "api-expired", "missing"], "never reread or overwrite a captured post"
+    assert open(f"{plaingov.DATA}/state/queue.json").read() == queue_before
+    assert "once at age 24–26 hours" in report_text(samples, fixed_age=True)
+    assert report_text([], fixed_age=True) == "No 24–26-hour snapshots for these posts."
+    # Archive original observations even when publication has aged out of the weekly timeline.
+    late = {**samples[0], "id": "previous-week", "observed_at": now - 6 * 86400, "age_hours": 25,
+            "created_at": plaingov.datetime.datetime.fromtimestamp(now - 6 * 86400 - 25 * 3600, plaingov.datetime.timezone.utc).isoformat()}
+    plaingov.write(sample_path, json.dumps(samples + [late, {**late, "id": "stale", "observed_at": now - 8 * 86400},
+                                                    {**late, "id": "future", "observed_at": now + 1}]))
+    plaingov.x_api = lambda *args: {"data": [{"id": r["id"], "text": r["text"], "created_at": r["created_at"],
+                                             "public_metrics": {"impression_count": 99}} for r in samples]}
+    plaingov.report()
+    archived = json.load(open(f"{plaingov.DATA}/state/reports/{time.strftime('%Y-%m-%d')}-24h.json"))
+    assert archived == samples + [late] and archived[0]["impression_count"] == 1
+    plaingov.x_api = sample_api
+    # Expired/young posts cause no API read; more than 100 eligible posts are batched.
+    plaingov.write(f"{plaingov.DATA}/state/posts.json", json.dumps(entries[:1]))
+    before = len(requests)
+    plaingov.sample_metrics()
+    assert len(requests) == before
+    plaingov.write(f"{plaingov.DATA}/state/posts.json", json.dumps([{**entries[-1], "tweet": f"batch-{i}"} for i in range(101)]))
+    plaingov.sample_metrics()
+    assert [len(ids) for ids in requests[-2:]] == [100, 1]
+    # A metrics outage cannot stop the weekly report after posting.
+    def unavailable(*args):
+        raise urllib.error.HTTPError("https://api.x.com/2/tweets", 429, "rate limited", {}, None)
+    plaingov.x_api = unavailable
+    plaingov.write(f"{plaingov.DATA}/state/posts.json", json.dumps(entries[-1:]))
+    plaingov.write(sample_path, "[]")
+    import glob
+    for path in glob.glob(f"{plaingov.DATA}/state/reports/*.json"):
+        os.utime(path, (0, 0))
+    ran = []
+    plaingov.post_best = lambda: ran.append("post")
+    plaingov.report = lambda: ran.append("report")
+    plaingov.post()
+    assert ran == ["post", "report"]
+finally:
+    plaingov.time.time, plaingov.x_api = original_time, original_x_api
+    plaingov.post_best, plaingov.report = original_post_best, original_report
 print("ok")
