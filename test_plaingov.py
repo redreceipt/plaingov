@@ -70,6 +70,17 @@ assert json.dumps(plaingov.normalize_stage(r)) == before, "repair is idempotent"
 
 assert sponsor_name("Rep. Smith, John [R-TX-5]") == "Rep. John Smith (R-TX)"
 
+# Contact links stay official and do not collect addresses or send messages.
+p = bill_page(rec)
+assert 'id="participate"' in p and "house.gov/representatives/find-your-representative" in p and "senate.gov/senators/senators-contact.htm" in p
+assert "The sponsor may not represent you" in p and "School Counseling Act" in p
+p = plaingov.participation({**rec, "state": "NY", "title": "<script>bad</script>"})
+assert "nyassembly.gov/mem/search/" in p and "nysenate.gov/find-my-senator" in p
+assert "&lt;script&gt;bad&lt;/script&gt;" in p and "<script>" not in p
+p = plaingov.participation({**rec, "state": "AK"})
+assert "usa.gov/elected-officials" in p and "house.gov/" not in p
+assert "<form" not in p and "<input" not in p and "mailto:" not in p
+
 # State milestones come from Open States action classifications.
 UP, LOW, GOV = '~{"classification": "upper"}', '~{"classification": "lower"}', '~{"classification": "executive"}'
 act = lambda d, kinds, o: {"date": d, "classification": kinds, "organization_id": o, "description": ""}

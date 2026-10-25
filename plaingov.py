@@ -928,6 +928,26 @@ def by_stage(recs, where):
     return out or "<p>Nothing new here yet. We check every day, so come back soon.</p>"
 
 
+def participation(r):
+    """Official lookup tools, not guessed districts or automatically sent messages."""
+    if not r.get("state"):
+        links = [("Find your U.S. representative", "https://www.house.gov/representatives/find-your-representative"),
+                 ("Find your U.S. senators", "https://www.senate.gov/senators/senators-contact.htm")]
+    elif r["state"] == "NY":
+        links = [("Find your New York assemblymember", "https://nyassembly.gov/mem/search/"),
+                 ("Find your New York state senator", "https://www.nysenate.gov/find-my-senator")]
+    else:
+        links = [("Find your state representatives through USA.gov", "https://www.usa.gov/elected-officials")]
+    details = f"{r['where']} · {r['label']}\n{r['title']}\n{r['official_url']}"
+    return ('<section id="participate"><h2>Contact your representatives</h2>'
+            '<p>The sponsor may not represent you. Use these official tools to find your own representatives and their contact information.</p>'
+            '<ul>' + "".join(f'<li><a href="{url}">{label}</a></li>' for label, url in links) + '</ul>'
+            '<details><summary>Bill details to include in your message</summary>'
+            '<p>Copy these details, then add your question or views in your own words.</p>'
+            f'<p style="white-space:pre-wrap;overflow-wrap:anywhere">{e(details)}</p></details>'
+            '<p class=meta>These links open government websites. PlainGov does not collect your address or send messages for you.</p></section>')
+
+
 def bill_page(r):
     st = r["stage"]
     if r.get("amendment"):
@@ -967,6 +987,7 @@ def bill_page(r):
 <h2>The basics</h2>
 <dl><dt>Bill number</dt><dd>{e(r['label'])}</dd><dt>Official name</dt><dd>{e(r['title'])}</dd>{sponsor}</dl>
 {history}
+{participation(r)}
 <a class=official href="{e(r['official_url'])}">Read the full bill on {e(host)} →</a>{credit}"""
     return page(f"{r['headline']} · PlainGov", r["summary"], body, r["id"] + "/")
 
