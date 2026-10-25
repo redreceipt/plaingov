@@ -36,7 +36,8 @@ assert us_stage("Became Public Law No: 119-45.")["step"] == 3 and us_stage("Read
 referral = "Referred to the Committee on Energy and Commerce, and in addition to the Committee on Ways and Means."
 assert us_stage(referral)["next"] == "" and "senator" not in us_stage(referral)["now"]
 assert us_stage("Read twice and referred to the Committee on Finance.")["next"] == ""
-assert us_stage("Received in Senate and referred to the Committee on Finance.")["next"].startswith("A small group in the Senate")
+received = us_stage("Received in Senate and referred to the Committee on Finance.")
+assert received["next"].startswith("A small group in the Senate") and received["now"] == "The bill is before the Senate."
 assert us_stage("Passed/agreed to in Senate: Passed Senate with an amendment to the House bill.")["short"] == "Passed the Senate"
 assert us_stage("Passed by unanimous consent.")["short"] == "In Congress"
 

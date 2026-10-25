@@ -115,8 +115,7 @@ def us_stage(desc):
         return stage(1, f"Passed the {ch}", f"The {ch} voted yes.", f"Now the {other} has to say yes too.")
     if desc.startswith("Reported"):
         return stage(0, f"Moving in the {ch}", f"A small group in the {ch} (a committee) looked it over and sent it on.", f"The whole {ch} might vote on it next.")
-    who = "Someone in the House" if ch == "House" else "A senator"
-    return stage(0, "Proposed", f"{who} proposed it.", f"A small group in the {ch} (a committee) looks at it first. Heads up: most bills never make it past this step.")
+    return stage(0, "Proposed", f"The bill is before the {ch}.", f"A small group in the {ch} (a committee) looks at it first. Heads up: most bills never make it past this step.")
 
 
 def sponsor_name(full):
