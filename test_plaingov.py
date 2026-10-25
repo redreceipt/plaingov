@@ -353,12 +353,16 @@ try:
     assert open(f"{plaingov.DATA}/state/queue.json").read() == queue_before
     assert "once at age 24–26 hours" in report_text(samples, fixed_age=True)
     assert report_text([], fixed_age=True) == "No 24–26-hour snapshots for these posts."
-    # Weekly reports archive the original observations, not newer lifetime counts.
+    # Archive original observations even when publication has aged out of the weekly timeline.
+    late = {**samples[0], "id": "previous-week", "observed_at": now - 6 * 86400, "age_hours": 25,
+            "created_at": plaingov.datetime.datetime.fromtimestamp(now - 6 * 86400 - 25 * 3600, plaingov.datetime.timezone.utc).isoformat()}
+    plaingov.write(sample_path, json.dumps(samples + [late, {**late, "id": "stale", "observed_at": now - 8 * 86400},
+                                                    {**late, "id": "future", "observed_at": now + 1}]))
     plaingov.x_api = lambda *args: {"data": [{"id": r["id"], "text": r["text"], "created_at": r["created_at"],
                                              "public_metrics": {"impression_count": 99}} for r in samples]}
     plaingov.report()
     archived = json.load(open(f"{plaingov.DATA}/state/reports/{time.strftime('%Y-%m-%d')}-24h.json"))
-    assert archived == samples and archived[0]["impression_count"] == 1
+    assert archived == samples + [late] and archived[0]["impression_count"] == 1
     plaingov.x_api = sample_api
     # Expired/young posts cause no API read; more than 100 eligible posts are batched.
     plaingov.write(f"{plaingov.DATA}/state/posts.json", json.dumps(entries[:1]))

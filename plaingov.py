@@ -1290,14 +1290,15 @@ def report():
     rows = [post_metrics(t, posts.get(t["id"], {}), observed_at) for t in tweets]
     day = time.strftime("%Y-%m-%d")
     write(f"{DATA}/state/reports/{day}.json", json.dumps(rows, indent=1))
-    ids = {r["id"] for r in rows}
-    samples = [r for r in load(f"{DATA}/state/metrics-24h.json", []) if r["id"] in ids]
+    # A post can age out of the timeline before its first snapshot reaches a weekly report.
+    samples = [r for r in load(f"{DATA}/state/metrics-24h.json", []) if observed_at - 7 * 86400 <= r["observed_at"] <= observed_at]
     write(f"{DATA}/state/reports/{day}-24h.json", json.dumps(samples, indent=1))
     sampled = {r["id"] for r in samples}
     missed = sum(r["age_hours"] >= 26 and r["id"] not in sampled for r in rows)
     waiting = sum(24 <= r["age_hours"] < 26 and r["id"] not in sampled for r in rows)
     young = sum(r["age_hours"] < 24 for r in rows)
-    text = (report_text(rows) + f"\n\n24–26-hour snapshots: {len(samples)} captured; {missed} missed; {waiting} awaiting capture; {young} under 24 hours.\n"
+    text = (report_text(rows) + f"\n\n24–26-hour snapshots captured in the last 7 days: {len(samples)}.\n"
+            + f"Current week's posts: {missed} missed; {waiting} awaiting capture; {young} under 24 hours.\n"
             + report_text(samples, fixed_age=True))
     if DRY_RUN:
         return print(text)
