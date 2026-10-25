@@ -10,14 +10,15 @@ PlainGov watches Congress and all 50 state legislatures, rewrites new bills and 
 
 ## Our mission
 
-Government should be easy for everyone to understand—and easy for everyone to participate in.
+**Everyone should be able to see what's happening in their federal and state governments, understand what it means, and easily take action.**
 
-PlainGov has two goals:
+PlainGov exists to make government transparent, understandable, and accessible to everyone. Our goals are:
 
-1. **Make government clear.** Explain what lawmakers are proposing, what bills actually do, and what has changed in straightforward, everyday language. People shouldn't need legal expertise or hours of research to understand decisions that affect their lives.
-2. **Make civic participation simple.** Help people find practical, accessible ways to get involved in the issues they care about, without having to navigate confusing processes or know where to start.
+1. **Know what's happening.** Make it easy to stay informed about what federal and state governments are doing, including proposed legislation, decisions, and changes that affect people's lives.
+2. **Understand what it means.** Explain government activity in clear, everyday language: what a bill or law actually does, what changed, where it stands, and why it matters—without jargon or requiring people to research it themselves.
+3. **Get involved easily.** Make it straightforward to act on issues people care about by showing relevant, practical ways to participate in the civic process, without confusing steps or barriers.
 
-The aim is to help people move from **understanding what's happening** to **knowing how they can take part**, without telling them what to think.
+The experience should make it simple to go from **what's happening** to **what it means** to **what I can do about it**. PlainGov helps people make their own informed decisions; it doesn't tell them what to think.
 
 ## How it works
 
