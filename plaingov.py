@@ -760,6 +760,9 @@ def normalize_stage(r):
     if not r.get("state") and actions:
         r["stage"] = us_stage(actions[-1].split(": ", 1)[-1])
         r["milestone"] = r["stage"]["step"] >= 1
+    # California's joint resolutions have no force of law (Assembly Chief Clerk glossary).
+    if r.get("state") == "CA" and re.fullmatch(r"[AS]JR\s*\d+", r["label"]):
+        r["resolution"] = True
     # shortcut: recognize Alaska's official filing; add other states only with verified instrument rules.
     if (r.get("state") == "AK" and re.match(r"^[HS]J?R\s*\d", r["label"])
             and any(re.search(r"PERMANENTLY FILED.*\bLEGIS RESOLVE\s+\d", a, re.I) for a in actions)):
@@ -801,9 +804,12 @@ def restage():
 
 def save(new):
     """Merge an update into the bill's record; only re-run the rewrite when the source or status changed."""
-    normalize_stage(new)
     path = f"{DATA}/bills/{new['id']}.json"
     rec = load(path, {"updates": []})
+    # Changing feeds cannot change a bill's known legal instrument.
+    for flag in ("resolution", "amendment"):
+        new[flag] = new.get(flag, False) or rec.get(flag, False)
+    normalize_stage(new)
     if (rec.get("source"), rec.get("stage"), rec.get("v")) != (new["source"], new["stage"], PROMPT_VERSION):
         rec.update(rewrite(new), v=PROMPT_VERSION)
     rec.update(new)
