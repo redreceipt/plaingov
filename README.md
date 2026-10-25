@@ -8,6 +8,17 @@ PlainGov watches Congress and all 50 state legislatures, rewrites new bills and 
 - **States:** each legislature's own website, scraped about daily with [Open States' open-source scrapers](https://github.com/openstates/openstates-scrapers): bills that passed a chamber, passed the legislature, became law, or were vetoed
 - **AI:** where a legislature words a milestone in a way its scraper doesn't recognize ("Act No. 245", "Returned by Governor without approval"), GPT 6 Luna reads the history of recently active bills to tell whether each passed, became law, or was vetoed; Claude rewrites each update in plain English from the official record; [jev](https://typesafe.ai) scores how interesting it is, and only the best few per day get posted
 
+## Our mission
+
+Government should be easy for everyone to understand—and easy for everyone to participate in.
+
+PlainGov has two goals:
+
+1. **Make government clear.** Explain what lawmakers are proposing, what bills actually do, and what has changed in straightforward, everyday language. People shouldn't need legal expertise or hours of research to understand decisions that affect their lives.
+2. **Make civic participation simple.** Help people find practical, accessible ways to get involved in the issues they care about, without having to navigate confusing processes or know where to start.
+
+The aim is to help people move from **understanding what's happening** to **knowing how they can take part**, without telling them what to think.
+
 ## How it works
 
 `plaingov.py` is one stdlib-only Python script, run hourly by systemd timers on an [exe.dev](https://exe.dev) VM:
