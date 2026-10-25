@@ -34,7 +34,9 @@ Lead with who is affected and the concrete change, preserving conditions and pro
 
 New posts retain their publication-time stage, milestone eligibility, link/question treatment and exact copy. Reports use that snapshot, not the bill's current stage. Older posts without a snapshot have unknown stage/eligibility; they stay in historical totals but are excluded from link groups. Link groups include only known milestone-eligible posts.
 
-Metrics include availability counts (`n=available/group size`); missing values are `n/a`, not zero. Reports save creation and observation times, but still contain lifetime metrics at different post ages. They are descriptive, not an equal-age comparison or evidence of a winning treatment. Fixed-age measurement and the link decision remain follow-up work in #44 before November 8. Public impressions do not establish payout eligibility (#42).
+Metrics include availability counts (`n=available/group size`); missing values are `n/a`, not zero. The hourly post job takes one snapshot per owned post at age **24–26 hours**, checking X's creation timestamp. The two-hour window tolerates an hourly timer delay; it is not an exact 24-hour measurement. Failed/omitted reads can retry within that window, never afterward. No eligible posts means no API request; normally this adds one owned read per post (about six reads/day at the current cadence).
+
+Weekly reports separate those snapshots from lifetime metrics and show captured, missed, awaiting-capture and younger-post counts. Creation/observation times and actual ages are saved; weekly snapshots are archived as `state/reports/YYYY-MM-DD-24h.json`. Missed windows stay missing rather than being filled with older metrics. Similar ages do not remove topic, posting-time or selection bias: no winning treatment is claimed. The link decision remains follow-up work in #44 before November 8. Public impressions do not establish payout eligibility (#42).
 
 ## Also check
 

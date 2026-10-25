@@ -1214,10 +1214,10 @@ def post_x(text):
 METRICS = ["impression_count", "like_count", "reply_count", "retweet_count", "quote_count", "bookmark_count", "user_profile_clicks", "url_link_clicks"]
 
 
-def report_text(rows):
-    """Descriptive lifetime snapshots, with coverage counts instead of fabricated zeroes."""
+def report_text(rows, fixed_age=False):
+    """Descriptive snapshots, with coverage counts instead of fabricated zeroes."""
     if not rows:
-        return "No posts in the last 7 days."
+        return "No 24–26-hour snapshots for these posts." if fixed_age else "No posts in the last 7 days."
 
     def metric(rs, name, aggregate):
         values = [r[name] for r in rs if r.get(name) is not None]
@@ -1226,6 +1226,7 @@ def report_text(rows):
 
     eligible = [r for r in rows if r.get("milestone") is True]
     out = [f"{len(rows)} posts. Totals: " + ", ".join(f"{m.removesuffix('_count')} {metric(rows, m, sum)}" for m in METRICS),
+           "Metrics captured once at age 24–26 hours; not a randomized experiment." if fixed_age else
            "Lifetime metrics at different post ages; descriptive only, not an experiment result.",
            f"Link groups: {len(eligible)}/{len(rows)} posts known to be milestone-eligible at publication; others excluded.", "",
            "Median impressions / likes / replies / profile clicks per post (n=available/group size):"]
@@ -1241,6 +1242,40 @@ def report_text(rows):
     return "\n".join(out)
 
 
+def post_metrics(tweet, posted, observed_at):
+    """Keep API observations paired with their publication context and actual age."""
+    bill = posted.get("id", "not ours")
+    created = datetime.datetime.fromisoformat(tweet["created_at"].replace("Z", "+00:00"))
+    hour = created.astimezone(zoneinfo.ZoneInfo("America/New_York")).hour
+    return {"id": tweet["id"], "bill": bill, "stage": posted.get("stage", "unknown"), "milestone": posted.get("milestone"),
+            "where": posted.get("where", "state" if bill.startswith("states/") else "federal" if bill.startswith("us/") else "unknown"),
+            "link": posted.get("link", "t.co/" in tweet["text"]), "question": posted.get("question", "Would this affect you?" in tweet["text"]),
+            "text": tweet["text"], "created_at": tweet["created_at"], "observed_at": observed_at,
+            "age_hours": (observed_at - created.timestamp()) / 3600,
+            "hours_et": f"{hour // 6 * 6:02d}-{hour // 6 * 6 + 6:02d}", **tweet.get("public_metrics", {}), **tweet.get("non_public_metrics", {})}
+
+
+def sample_metrics():
+    """Hourly: read each owned post once at 24–26 hours; never backfill a missed window with older metrics."""
+    path, now = f"{DATA}/state/metrics-24h.json", time.time()
+    with queue_lock():
+        samples = {r["id"]: r for r in load(path, [])}
+        todo = {p["tweet"]: p for p in load(f"{DATA}/state/posts.json", [])
+                if p["tweet"] != "dry-run" and p["tweet"] not in samples and 24 * 3600 <= now - p["at"] < 26 * 3600}
+        ids, captured = list(todo), 0
+        for start in range(0, len(ids), 100):  # X accepts at most 100 IDs per lookup.
+            response = x_api("GET", "https://api.x.com/2/tweets", {"ids": ",".join(ids[start:start + 100]),
+                             "tweet.fields": "created_at,public_metrics,non_public_metrics"})
+            observed_at = time.time()
+            for tweet in response.get("data", []):
+                row = post_metrics(tweet, todo[tweet["id"]], observed_at)
+                if 24 <= row["age_hours"] < 26:  # Check X's creation time, including time spent on the request.
+                    samples[row["id"]] = row
+                    captured += 1
+            write(path, json.dumps(list(samples.values())[-500:], indent=1))
+    print(f"metrics: {captured} captured at 24–26 hours; {len(todo) - captured} unavailable or outside the window")
+
+
 def report():
     """Weekly X engagement for the last 7 days of posts, emailed with the alerts and kept in state/reports/ to compare
     experiments against. Reading our own posts costs $0.001 each."""
@@ -1251,19 +1286,19 @@ def report():
     tweets = x_api("GET", f"https://api.x.com/2/users/{me}/tweets", {"start_time": since, "max_results": "100",
                    "tweet.fields": "created_at,public_metrics,non_public_metrics"}).get("data", [])
     posts = {p["tweet"]: p for p in load(f"{DATA}/state/posts.json", [])}
-    rows, observed_at = [], time.time()
-    for t in tweets:
-        posted = posts.get(t["id"], {})
-        bill = posted.get("id", "not ours")
-        hour = datetime.datetime.fromisoformat(t["created_at"].replace("Z", "+00:00")).astimezone(zoneinfo.ZoneInfo("America/New_York")).hour
-        rows.append({"id": t["id"], "bill": bill, "stage": posted.get("stage", "unknown"), "milestone": posted.get("milestone"),
-                     "where": posted.get("where", "state" if bill.startswith("states/") else "federal" if bill.startswith("us/") else "unknown"),
-                     "link": posted.get("link", "t.co/" in t["text"]), "question": posted.get("question", "Would this affect you?" in t["text"]),
-                     "text": t["text"], "created_at": t["created_at"], "observed_at": observed_at,
-                     "hours_et": f"{hour // 6 * 6:02d}-{hour // 6 * 6 + 6:02d}", **t.get("public_metrics", {}), **t.get("non_public_metrics", {})})
+    observed_at = time.time()
+    rows = [post_metrics(t, posts.get(t["id"], {}), observed_at) for t in tweets]
     day = time.strftime("%Y-%m-%d")
     write(f"{DATA}/state/reports/{day}.json", json.dumps(rows, indent=1))
-    text = report_text(rows)
+    ids = {r["id"] for r in rows}
+    samples = [r for r in load(f"{DATA}/state/metrics-24h.json", []) if r["id"] in ids]
+    write(f"{DATA}/state/reports/{day}-24h.json", json.dumps(samples, indent=1))
+    sampled = {r["id"] for r in samples}
+    missed = sum(r["age_hours"] >= 26 and r["id"] not in sampled for r in rows)
+    waiting = sum(24 <= r["age_hours"] < 26 and r["id"] not in sampled for r in rows)
+    young = sum(r["age_hours"] < 24 for r in rows)
+    text = (report_text(rows) + f"\n\n24–26-hour snapshots: {len(samples)} captured; {missed} missed; {waiting} awaiting capture; {young} under 24 hours.\n"
+            + report_text(samples, fixed_age=True))
     if DRY_RUN:
         return print(text)
     alert(f"PlainGov: X report for the week ending {day}", text)
@@ -1273,6 +1308,10 @@ def report():
 def post():
     with queue_lock():
         post_best()
+    try:
+        sample_metrics()
+    except Exception as ex:  # A metrics outage must not stop posting or the weekly report.
+        print(f"X metrics sampling failed: {ex!r}", file=sys.stderr, flush=True)
     reports = sorted(glob.glob(f"{DATA}/state/reports/*.json"))
     if not reports or time.time() - os.path.getmtime(reports[-1]) > 7 * 86400 - 3600:  # weekly, from the hourly post timer
         try:
