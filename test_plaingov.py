@@ -23,7 +23,8 @@ assert "Would this affect you?" not in tweet_text({**rec, "tweet": "Gives states
 # Pages escape model output and link back to their list page.
 p = bill_page(rec)
 assert "Funds counselors &lt;b&gt;in&lt;/b&gt; schools" in p and "<b>in</b>" not in p
-assert "<li class=done aria-current=step>Proposed</li>" in p and 'href="/us/"' in p
+assert "<h2>Where it stands</h2>" in p and 'href="/us/"' in p
+assert "<ol class=tracker>" not in p and "<summary>Official history</summary>" in p
 
 assert us_stage("Passed House")["short"] == "Passed the House"
 assert us_stage("Senate agreed to House amendment")["step"] == 2
@@ -143,10 +144,56 @@ assert "usa.gov/elected-officials" in p and "house.gov/" not in p
 assert "<form" not in p and "<input" not in p and "mailto:" not in p
 assert "https://malegislature.gov/Search/FindMyLegislator" in plaingov.participation({**rec, "state": "MA"})
 
+# Next steps use the latest action, never the sponsor or bill prefix.
+ma = {**rec, "state": "MA", "where": "Massachusetts", "stage": state_stage("MA", 2, "lower"),
+      "latest_action": {"date": "2026-10-22", "text": "Read; and placed in the Orders of the Day for the next session", "chamber": "upper"}}
+assert plaingov.next_decision(ma) == ("With the Senate. No vote date confirmed.", "Senate", False)
+assert "Legislators/Members/Senate" in bill_page(ma)
+assert "Massachusetts Senate" in bill_page(ma) and "Oct 22, 2026" in bill_page(ma)
+committee = {**ma, "latest_action": {"date": "2026-10-22", "text": "Referred to the committee on Ways and Means", "chamber": "upper"}}
+assert plaingov.next_decision(committee)[2] and "Ways and Means" in bill_page(committee)
+assert 'href="https://malegislature.gov/Committees"' in bill_page(committee)
+assert "Legislators/Members/Senate" not in bill_page(committee), "do not substitute the full chamber for a committee"
+assert 'href="https://malegislature.gov/Committees/Detail/J39"' in bill_page(committee, {"committees": {"ways and means": "https://malegislature.gov/Committees/Detail/J39"}})
+assert 'href="https://malegislature.gov/Committees"' in bill_page(committee, {"committees": {"ways and means": None}})
+for record in ({**ma, "latest_action": {}, "actions": []}, {**rec, "actions": ["2026-10-22: " + referral]}):
+    assert plaingov.next_decision(record)[1] == "", "no guessed chamber"
+received_rec = {**rec, "actions": ["2026-10-22: Received in Senate and referred to the Committee on Finance."]}
+assert plaingov.next_decision(received_rec)[1:] == ("Senate", "Committee on Finance")
+assert 'href="https://www.senate.gov/committees/"' in bill_page(received_rec)
+assert "clerk.house.gov/committees" not in bill_page(received_rec)
+unknown_chamber = bill_page({**rec, "actions": ["2026-10-22: " + referral]})
+assert "clerk.house.gov/committees" in unknown_chamber and "senate.gov/committees/" in unknown_chamber
+for record in ({**ma, "stage": state_stage("MA", 4)}, {**ma, "stage": state_stage("MA", 5)},
+               {**ma, "resolution": True}, {**ma, "amendment": True}):
+    assert plaingov.next_decision(record) == ("", "", False)
+    assert "Legislators/Members/Senate" not in bill_page(record)
+assert plaingov.next_decision({**ma, "latest_action": {"text": "Presented to the Governor"}})[1] == "Governor"
+assert plaingov.next_decision({**ma, "latest_action": {"text": "Passed to be engrossed"}})[1] == "Senate"
+assert not plaingov.next_decision({**ma, "latest_action": {"text": "Failed to pass"}})[1]
+
+# Public contacts stay bound to a single official profile in the same current-roster row.
+row = '''<tr><td><a href="/Legislators/Profile/MJB0"><img src="x"></a></td>
+<td><a href="/Legislators/Profile/MJB0">Michael</a></td><td><a href="/Legislators/Profile/MJB0">Barrett</a></td>
+<td>(617) 722-1572</td><td><a href="mailto:Mike.Barrett@masenate.gov">Email</a></td></tr>'''
+members = plaingov.ma_members(row)
+assert members == [{"id": "MJB0", "name": "Michael Barrett", "phone": "6177221572", "email": "Mike.Barrett@masenate.gov"}]
+assert not plaingov.ma_members(row.replace('>Barrett</a>', '>Barrett</a><a href="/Legislators/Profile/OTHER">Other</a>'))
+assert not plaingov.ma_members(row.replace("MJB0", "../bad"))
+assert plaingov.ma_members(row.replace("masenate.gov", "example.org"))[0]["email"] == ""
+p = bill_page(ma, {"members": {"Senate": members}, "checked": "2026-10-26"})
+assert 'href="tel:+16177221572"' in p and 'href="mailto:Mike.Barrett@masenate.gov"' in p
+assert "See 1 Senate members here" in p and "not a list of lawmakers opposing" in p
+p = bill_page({**rec, "details": ["Gives states grants.", "More <details>."], "changes": ""})
+assert p.count('<p class=lede>Gives states grants.</p>') == 1 and "<p>Gives states grants.</p>" not in p
+assert "<p>More &lt;details&gt;.</p>" in p and "<h2>What it does" not in p and "<h2>What changes" not in p
+
 # State milestones come from Open States action classifications.
 UP, LOW, GOV = '~{"classification": "upper"}', '~{"classification": "lower"}', '~{"classification": "executive"}'
 act = lambda d, kinds, o: {"date": d, "classification": kinds, "organization_id": o, "description": ""}
 assert bill_stage({"actions": [act("2026-01-10", ["introduction"], UP)]}) is None
+assert plaingov.action_context([act("2026-01-10", [], LOW), act("2026-01-10", [], UP)])["chamber"] == "upper"
+assert plaingov.action_context([]) == {"date": "", "text": "", "chamber": ""}
 assert bill_stage({"actions": [act("2026-02-01", ["passage"], UP)]}) == (2, "upper", "2026-02-01")
 both = [act("2026-02-01", ["passage"], UP), act("2026-03-01", ["passage"], LOW)]
 assert bill_stage({"actions": both}) == (3, None, "2026-03-01")
@@ -320,10 +367,23 @@ calls.clear()
 rewrite({**rec, "resolution": True, "stage": {"step": 2, "short": "Adopted", "now": "Adopted", "next": ""}, "source": "A resolution urging action."})
 assert "This is a resolution, not an enacted law." in calls[0][1] and "This is NOT law yet" not in calls[0][1]
 
+original_ask = plaingov.ask_json
+try:
+    prompts = []
+    answers = [{**r, "details": ["Only the title is available."]}, r, {"vague": False, "unsupported": []}]
+    def answer(prompt, *args):
+        prompts.append(prompt)
+        return answers.pop(0)
+    plaingov.ask_json = answer
+    rewrite({**ma, "source": "A property tax exemption."})
+    assert "It talks about the source" in prompts[1] and "Chamber for the latest action: Senate" in prompts[0]
+finally:
+    plaingov.ask_json = original_ask
+
 # Pages show the specifics, the official record, and say so when we only have a title.
 p = bill_page({**rec, "details": ["Under 21 days old."], "changes": "Adds drop boxes.", "effective": "September 10, 2026",
                "happened": "The Governor signed it on September 9, 2026.", "actions": ["2026-09-09: SIGNED INTO LAW"], "limited": True})
-assert all(x in p for x in ("<h2>What it does</h2><ul><li>Under 21 days old.", "What changes", "September 10, 2026", "only have this bill's official title",
+assert all(x in p for x in ("<p>Under 21 days old.</p>", "<p>Adds drop boxes.</p>", "September 10, 2026", "only have this bill's official title",
                             "The Governor signed it on September 9, 2026.", "<li>2026-09-09: SIGNED INTO LAW</li>")), p
 # Missing metrics stay unavailable; only known milestone posts enter link groups.
 rows = [{"id": "1", "bill": "us/a", "stage": "It's law", "where": "federal", "milestone": True, "link": True, "question": False, "hours_et": "06-12", "impression_count": 100, "like_count": 3},

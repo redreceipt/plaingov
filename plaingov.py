@@ -167,6 +167,7 @@ def congress_update(b):
         "sponsor_bioguide_id": bioguide if isinstance(bioguide, str) and re.fullmatch(r"[A-Z][0-9]{6}", bioguide) else None,
         "milestone": st["step"] >= 1, "source": " ".join(x for x in (b["title"], crs, text) if x)[:SOURCE_CHARS],
         "actions": [f"{a['actionDate']}: {a['text']}"],
+        "latest_action": {"date": a["actionDate"], "text": a["text"], "chamber": ""},
     }
 
 
@@ -280,6 +281,12 @@ def last_actions(acts):
     return [f"{a['date'][:10]}: {a['description']}" for a in sorted(acts, key=lambda a: a["date"])[-6:]]
 
 
+def action_context(acts):
+    """Preserve the latest action's chamber, not the bill's originating chamber."""
+    a = sorted(acts, key=lambda a: a["date"])[-1] if acts else {}
+    return {"date": a.get("date", "")[:10], "text": a.get("description", ""), "chamber": org(a.get("organization_id"))}
+
+
 def state_id(b):
     return f"states/{b['state'].lower()}/{slug(b['legislative_session'])}-{slug(b['identifier'])}"
 
@@ -317,6 +324,7 @@ def state_update(b):
     source = " ".join(x for x in (b["title"], abstract, bill_text(b)) if x)[:SOURCE_CHARS]
     return {
         "id": state_id(b), "where": STATES[st], "state": st, "actions": last_actions(b.get("actions", [])),
+        "latest_action": action_context(b.get("actions", [])),
         "label": b["identifier"], "resolution": False, "amendment": "constitutional amendment" in b.get("classification", []), "title": b["title"], "official_url": (b["sources"] or [{"url": ""}])[0]["url"],
         "sponsor": sponsor, "date": day, "stage": state_stage(st, status, chamber), "milestone": True, "source": source,
         "sponsor_profile_id": ma_sponsor(b),
@@ -429,10 +437,15 @@ def legiscan_update(b):
     st, (status, chamber, day), num = b["state"], b["status"], b["number"]
     desc = b.get("description") or ""
     actions, text = [f"{b['last_action_date']}: {b['last_action']}"] if b.get("last_action") else [], ""
+    latest = {"date": b.get("last_action_date", ""), "text": b.get("last_action", ""), "chamber": ""}
     if b.get("bill_id"):
         q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], "op": "getBill", "id": b["bill_id"]})
         bill = json.loads(fetch(f"https://api.legiscan.com/?{q}")).get("bill", {})
-        actions = [f"{h['date']}: {h['action']}" for h in bill.get("history", [])[-6:]] or actions
+        history = sorted(bill.get("history", []), key=lambda h: h["date"])
+        actions = [f"{h['date']}: {h['action']}" for h in history[-6:]] or actions
+        if history:
+            h = history[-1]
+            latest = {"date": h["date"], "text": h["action"], "chamber": {"H": "lower", "S": "upper"}.get(h.get("chamber"), "")}
         for t in reversed(bill.get("texts", [])):
             try:
                 if len(text := doc_text(t["state_link"])) > 200:
@@ -447,7 +460,7 @@ def legiscan_update(b):
                     print(f"LegiScan text {t.get('doc_id')}: {ex2!r}", file=sys.stderr, flush=True)
             text = ""
     return {
-        "id": legiscan_id(b), "where": STATES[st], "actions": actions,
+        "id": legiscan_id(b), "where": STATES[st], "actions": actions, "latest_action": latest,
         "state": st, "label": re.sub(r"^([A-Z]+)(\d+)$", r"\1 \2", num), "resolution": False, "title": b["title"], "official_url": b["url"],
         "date": day, "stage": state_stage(st, status, chamber), "milestone": True,
         "source": " ".join(x for x in (b["title"], "" if desc == b["title"] else desc, text) if x)[:SOURCE_CHARS],
@@ -592,13 +605,14 @@ def scrape(only=None):
 
 # --- AI: plain-English rewrite (Claude) and interest score (jev) ----------------
 
-PROMPT_VERSION = 5  # bump to rewrite every page with a changed prompt (python3 plaingov.py refresh)
+PROMPT_VERSION = 6  # bump to rewrite every page with a changed prompt (python3 plaingov.py refresh)
 PROMPT = """You write for PlainGov, which explains government to regular people who don't follow politics. After reading your page, someone should know exactly what this {where} bill does, what it changes, and what just happened to it.
 
 Rules:
 - Use only facts in the source and official actions. Don't guess about effects, costs, or motives, and never invent details.
 - Be concrete everywhere, headline included: name the actual people, places, amounts, ages, deadlines, and limits the source gives. Never write placeholders like "certain places" or "a safety device" when the source says what they are. Don't pad with definitions of general terms (don't explain what an effective date is: give the date).
-- Keep legal conditions and exceptions intact: if protection only applies when conditions are met, say so instead of rounding it to "no penalty".
+- Keep legal conditions and exceptions intact: if protection only applies when conditions are met, say so instead of rounding it to "no penalty". Include the dates used to measure eligibility, ages or residency.
+- Be concise: state each fact once. No filler such as "if they meet the requirements" or a preview of topics explained later. Combine related conditions into short, compact paragraphs. Omit administrative boilerplate unless it affects eligibility, benefits, obligations or timing.
 - Say what's new versus what already existed when the source shows it. "[added: ...]" and "[removed: ...]" mark changed text, and "is amended to read" means existing law is being changed. Don't call something new if the bill only adjusts an existing rule.
 - Neutral and nonpartisan. No opinions, hype, slang, emojis, or hashtags.
 - Everyday words and short sentences, about an 8th-grade reading level. Explain any legal or technical term in a few plain words, and don't cite statute numbers (like "AS 11.81.500" or "section 8-11-155").
@@ -610,9 +624,9 @@ Rules:
 Reply with only a JSON object with these keys:
 "headline": what changes for people, in 4-10 everyday words, sentence case, no period (max 70 characters). Like "Hospitals would have to give you an itemized bill"
 "tweet": one sentence that makes someone stop scrolling, leading with who it affects or what changes for them, in concrete terms (max 140 characters)
-"summary": 2-3 short sentences: the main thing it does and who it affects (max 350 characters)
-"details": a list of 2-6 short sentences with the specifics: who it covers, what's required or allowed, limits, exceptions, money, deadlines ([] if the source doesn't say)
-"changes": 1-2 sentences on what's different from current law ("" if the source doesn't show it)
+"summary": one or two short opening sentences: the practical change and who it affects, not a preview of every condition. This also appears in page listings. Do not repeat these facts in details.
+"details": additional short paragraphs continuing the explanation ([] if unnecessary). Together with summary, write the shortest complete explanation, not a list of provisions. Group related facts, remove repetition, and weave in what changes from current law when supported. Keep essential eligibility, amounts, conditions and exceptions. No headings, bullets, generic filler or fixed paragraph count. Do not repeat the effective field or legislative status here.
+"changes": "" (explain supported changes within summary/details instead)
 "effective": when it takes effect, like "September 10, 2026" or "90 days after it becomes law"; prefer a date in the official actions over one in the text ("" if neither says)
 "happened": one sentence on the latest official action and its date, in plain words, like "The Governor signed it on September 9, 2026."
 "limited": true if the source is only a title or short description, else false
@@ -625,6 +639,7 @@ Source: {source}"""
 
 CHECK_PROMPT = """Check this plain-English explanation of a bill against its official source and actions. Reply with only JSON: {{"vague": true or false, "unsupported": ["..."]}}
 Status: {status}
+- Evaluate summary, details and effective together. Flag an omitted condition only when it materially broadens eligibility or legal effects. Omitting secondary provisions is fine. Headlines and tweets are brief previews: they need not repeat conditions explained on the page, but must not promise an unconditional entitlement.
 - vague: true only if it stays at the level of the topic (names the subject, or uses placeholders like "certain places" or "a safety device") when the source says what the bill actually requires, allows, or covers. Leaving out some details is fine.
 - unsupported: each claim that the source or actions don't support, including overstated legal effects, and wording that doesn't match the status (a law described with "would", or a proposal described as if it were law). Plain rewording is fine. [] if none.
 
@@ -652,6 +667,10 @@ def rewrite(rec):
     STAGE_MODEL (more precise, less plain) a last one. A rewrite that still fails raises, so the bill is tried again next
     run instead of publishing something vague or wrong."""
     actions = "\n".join(rec.get("actions") or [f"{rec['date']}: {rec['stage']['now']}"])
+    chamber = {"upper": "Senate", "lower": "Assembly" if rec.get("state") in ASSEMBLY else "House",
+               "legislature": "Legislature"}.get((rec.get("latest_action") or {}).get("chamber"))
+    if chamber:
+        actions += f"\nChamber for the latest action: {chamber}."
     prompt = PROMPT.format(**{**rec, "actions": actions, "status": rec["stage"]["now"] + (
         " This is a constitutional amendment proposal, not an enacted law." if rec.get("amendment")
         else " This is a resolution, not an enacted law. Describe its requests or position, not legal requirements." if rec.get("resolution")
@@ -662,7 +681,8 @@ def rewrite(rec):
         out = {k: [" ".join(str(x).split()) for x in (v if isinstance(v, list) else [v] if v else [])] if k == "details"
                else bool(v) if k == "limited" else " ".join(str(v).split()) for k, v in out.items() if k in REWRITE_KEYS}
         problems = []
-        if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out.get("summary", "") + out.get("tweet", ""), re.I):
+        prose = " ".join([out.get("summary", ""), out.get("tweet", ""), *out.get("details", []), out.get("changes", "")])
+        if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't|is available)\b|\bonly (the )?title\b", prose, re.I):
             problems.append("It talks about the source instead of the bill.")
         if not all(out.get(k) for k in ("headline", "tweet", "summary")):
             problems.append("headline, tweet, and summary are required.")
@@ -849,7 +869,6 @@ def save(new):
 e = html.escape
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")  # logo, icons, social card (brand/build.py)
 MARK = open(os.path.join(STATIC, "favicon.svg")).read().replace("<svg ", '<svg aria-hidden="true" width="28" height="28" ', 1)
-STEPS = ["Proposed", "Halfway there", "Passed House & Senate", "It's law"]
 CSS = """
 :root{--ink:#111827;--muted:#4b5563;--soft:#6b7280;--line:#e5e2db;--bg:#fbfaf7;--accent:#1d4ed8;--done:#15803d}
 *{box-sizing:border-box}
@@ -872,15 +891,15 @@ h2{font-size:1.15rem;margin:2.25rem 0 .5rem}
 .lede{font-size:1.2rem;color:#1f2937}
 .box{background:#fff;border:1px solid var(--line);border-radius:12px;padding:1rem 1.25rem}
 .box p{margin:.5rem 0}
-.tracker{list-style:none;padding:0;margin:0 0 1rem;display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem}
-.tracker li{font-size:.85rem;line-height:1.3;color:var(--soft);border-top:6px solid var(--line);padding-top:.4rem}
-.tracker li.done{border-color:var(--done);color:var(--ink)}
-.tracker li[aria-current]{font-weight:700}
+summary{cursor:pointer;font-weight:600}
+details{margin:1rem 0}h3{font-size:1rem;margin:1.25rem 0 .5rem}
+#participate{border-top:1px solid var(--line);margin-top:1rem}
 dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:0}
 dt{color:var(--soft)}dd{margin:0}
 .list{list-style:none;padding:0;margin:0}
 .list li{border-bottom:1px solid var(--line);padding:.8rem 0}
 .list a{font-weight:600;text-decoration:none;color:var(--ink)}.list a:hover{text-decoration:underline}
+.contacts a{color:var(--accent);text-decoration:underline}
 .meta{display:block;color:var(--soft);font-size:.85rem}
 .more{display:inline-block;margin-top:.75rem;font-weight:600}
 .grid{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.5rem}
@@ -893,7 +912,7 @@ table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;
 .foot p{margin:.4rem 0 0}
 .foot nav{display:flex;flex-wrap:wrap;gap:.4rem 1.1rem;max-width:25rem}.foot nav a{color:var(--muted)}
 .fine{font-size:.8rem;color:var(--soft);margin-top:1.25rem}
-@media (max-width:32rem){.hero h1{font-size:1.9rem}h1{font-size:1.6rem}.tracker{grid-template-columns:1fr 1fr}.top nav{gap:.8rem}.top nav a{font-size:.9rem}}
+@media (max-width:32rem){.hero h1{font-size:1.9rem}h1{font-size:1.6rem}.top nav{gap:.8rem}.top nav a{font-size:.9rem}}
 """
 
 
@@ -958,8 +977,37 @@ def by_stage(recs, where):
     return out or "<p>Nothing new here yet. We check every day, so come back soon.</p>"
 
 
-def participation(r):
-    """Official lookup tools, not guessed districts or automatically sent messages."""
+def next_decision(r):
+    """Explain only supported next steps; a chamber's members are not a list of blockers."""
+    st = r["stage"]
+    if r.get("resolution") or r.get("amendment") or st["step"] == 3 or "Veto" in st["short"]:
+        return "", "", False
+    a = r.get("latest_action") or {}
+    text = a.get("text") or (r.get("actions") or [""])[-1].partition(": ")[2]
+    chamber = {"upper": "Senate", "lower": "Assembly" if r.get("state") in ASSEMBLY else "House",
+               "legislature": "Legislature"}.get(a.get("chamber"), "")
+    received = re.search(r"\b(?:Received in|Read twice.*in|Introduced in) (House|Senate)\b", text, re.I)
+    if received:
+        chamber = received[1].title()
+    referral = re.search(r"\breferred to (?:the )?(.+?)(?:\.\s|\.$|;|$)", text, re.I)
+    if referral and re.search(r"\bcommittee\b", referral[1], re.I):
+        name = referral[1].rstrip(".")
+        return f"With {name}. No hearing or vote date confirmed.", chamber, name
+    if re.search(r"\b(?:presented|sent|transmitted|delivered) to (?:the )?(Governor|President)\b", text, re.I):
+        office = "Governor" if r.get("state") else "President"
+        return f"Awaiting the {office}'s decision.", office, False
+    if chamber and re.search(r"Orders of the Day|placed on.*calendar|Received in|Introduced in", text, re.I):
+        return f"With the {chamber}. No vote date confirmed.", chamber, False
+    if st["step"] == 1 and re.match(r"Passed(?:/agreed to)?\b", text, re.I):
+        passed = st["short"].removeprefix("Passed the ")
+        if passed in ("House", "Assembly", "Senate"):
+            other = ("Assembly" if r.get("state") in ASSEMBLY else "House") if passed == "Senate" else "Senate"
+            return f"The {other} must also approve it. Its next action is not verified.", other, False
+    return "The next decision-maker or action is not verified.", "", False
+
+
+def participation(r, profiles={}):
+    """User-initiated contact, with an official finder when the reader's district is unknown."""
     if not r.get("state"):
         links = [("Find your U.S. representative", "https://www.house.gov/representatives/find-your-representative"),
                  ("Find your U.S. senators", "https://www.senate.gov/senators/senators-contact.htm")]
@@ -971,8 +1019,38 @@ def participation(r):
     else:
         links = [("Find your state representatives through USA.gov", "https://www.usa.gov/elected-officials")]
     details = f"{r['where']} · {r['label']}\n{r['title']}\n{r['official_url']}"
-    return ('<section id="participate"><h2>Contact your representatives</h2>'
-            '<p>The sponsor may not represent you. Use these official tools to find your own representatives and their contact information.</p>'
+    _, chamber, committee = next_decision(r)
+    direct = ""
+    if committee and not r.get("state"):
+        directories = [("House", "https://clerk.house.gov/committees"), ("Senate", "https://www.senate.gov/committees/")]
+        direct = "".join(f'<p><a href="{url}">{ch} committees and contact details →</a></p>' for ch, url in directories if not chamber or ch == chamber)
+    elif committee:
+        name = re.sub(r"^(?:the )?committee on ", "", committee, flags=re.I).casefold()
+        match = profiles.get("committees", {}).get(name) if r.get("state") == "MA" else None
+        url = match or ("https://malegislature.gov/Committees" if r.get("state") == "MA" else r["official_url"])
+        label = "Committee members and contact details" if match else "Find the committee" if r.get("state") == "MA" else "See the committee referral in the official record"
+        direct = f'<p><a href="{e(url)}">{label} →</a></p>'
+    elif chamber in ("House", "Senate") and (r.get("state") == "MA" or not r.get("state")):
+        url = (f"https://malegislature.gov/Legislators/Members/{chamber}" if r.get("state") == "MA" else
+               "https://www.senate.gov/senators/" if chamber == "Senate" else "https://www.house.gov/representatives")
+        direct = f'<p><a href="{url}">{e(r["where"])} {chamber}: members and contact details →</a></p>'
+        members = profiles.get("members", {}).get(chamber, []) if r.get("state") == "MA" else []
+        if members:
+            rows = []
+            for member in members:
+                contact = (f' · <a href="tel:+1{member["phone"]}" aria-label="Call {e(member["name"])}">Call</a>' if member["phone"] else "")
+                contact += (f' · <a href="mailto:{e(member["email"])}" aria-label="Email {e(member["name"])}">Email</a>' if member["email"] else "")
+                rows.append(f'<li><a href="https://malegislature.gov/Legislators/Profile/{member["id"]}">{e(member["name"])}</a>{contact}</li>')
+            direct += (f'<details><summary>See {len(members)} {chamber} members here</summary>'
+                       '<p class=meta>These are current chamber members, not a list of lawmakers opposing or delaying this bill.</p>'
+                       '<ul class="list contacts">' + "".join(rows) + '</ul>'
+                       f'<p class=meta>Official roster checked {date(profiles["checked"])}</p></details>')
+    elif chamber == "President":
+        direct = '<p><a href="https://www.whitehouse.gov/contact/">Contact the President’s office →</a></p>'
+    elif chamber == "Governor" and r.get("state") == "MA":
+        direct = '<p><a href="https://www.mass.gov/info-details/email-the-governors-office">Contact the Governor’s office →</a></p>'
+    return ('<section id="participate"><h3>Want to get involved?</h3>' + direct +
+            '<p class=meta>The sponsor may not represent you. Find your own representatives:</p>'
             '<ul>' + "".join(f'<li><a href="{url}">{label}</a></li>' for label, url in links) + '</ul>'
             '<details><summary>Bill details to include in your message</summary>'
             '<p>Copy these details, then add your question or views in your own words.</p>'
@@ -1001,10 +1079,27 @@ def house_members():
         return {}
 
 
+def ma_members(page):
+    """Names and public office contacts from the same row as an official profile ID."""
+    members = {}
+    for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", page, re.S):
+        links = re.findall(r'<a\b[^>]*href="/Legislators/Profile/([A-Za-z0-9_]+)"[^>]*>(.*?)</a>', row, re.S)
+        ids = {id for id, _ in links}
+        names = list(dict.fromkeys(strip(name) for _, name in links if strip(name)))
+        if len(ids) != 1 or not names:
+            continue
+        id = ids.pop()
+        phone = re.search(r"\(\d{3}\) \d{3}-\d{4}", strip(row))
+        email = re.search(r'href="mailto:([A-Za-z0-9._+-]+@(?:masenate|mahouse)\.gov)"', row, re.I)
+        members[id] = {"id": id, "name": " ".join(names), "phone": re.sub(r"\D", "", phone[0]) if phone else "",
+                       "email": email[1] if email else ""}
+    return list(members.values())
+
+
 def sponsor_profiles(recs):
     """Only current official rosters can turn persisted sponsor IDs into links."""
     import xml.etree.ElementTree as ET
-    links = {}
+    links, members, committees = {}, {}, {}
     if any(not r.get("state") and r.get("sponsor_bioguide_id") for r in recs):
         house = house_members()
         links.update({f"US:{id}": (f"https://clerk.house.gov/members/{id}", "Official House profile and contact details", f'{ordinal(house["congress"])} Congress') for id in house.get("ids", [])})
@@ -1015,15 +1110,25 @@ def sponsor_profiles(recs):
                           for id, st in senators.items() if re.fullmatch(r"[A-Z][0-9]{6}", id or "") and st in STATES})
         except Exception as ex:
             print(f"Senate roster unavailable; omitting Senate links: {ex!r}", file=sys.stderr, flush=True)
-    if any(r.get("state") == "MA" and r.get("sponsor_profile_id") for r in recs):
+    if any(r.get("state") == "MA" for r in recs):
         for chamber in ("House", "Senate"):
             try:
                 page = fetch(f"https://malegislature.gov/Legislators/Members/{chamber}", timeout=10)
                 ids = re.findall(r'<a\b[^>]*href="/Legislators/Profile/([A-Za-z0-9_]+)"', page)
+                members[chamber] = ma_members(page)
                 links.update({f"MA:{id}": (f"https://malegislature.gov/Legislators/Profile/{id}", "Official Massachusetts profile and contact details", f"Current Massachusetts {chamber} roster") for id in ids})
             except Exception as ex:
                 print(f"MA {chamber} roster unavailable; omitting its links: {ex!r}", file=sys.stderr, flush=True)
-    return {"links": links, "checked": datetime.datetime.now(datetime.timezone.utc).date().isoformat()}
+        try:
+            page = fetch("https://malegislature.gov/Committees", timeout=10)
+            for path, name in re.findall(r'<a\b[^>]*href="(/Committees/Detail/[A-Za-z0-9]+)"[^>]*>(.*?)</a>', page, re.S):
+                key = strip(name).casefold()
+                url = "https://malegislature.gov" + path
+                committees[key] = url if key not in committees or committees[key] == url else None
+        except Exception as ex:
+            print(f"MA committee directory unavailable: {ex!r}", file=sys.stderr, flush=True)
+    return {"links": links, "members": members, "committees": committees,
+            "checked": datetime.datetime.now(datetime.timezone.utc).date().isoformat()}
 
 
 def bill_page(r, profiles={}):
@@ -1033,21 +1138,20 @@ def bill_page(r, profiles={}):
     elif r["resolution"]:
         track = "<p>This is a resolution, not an enacted law.</p>"
     else:
-        track = "<ol class=tracker>" + "".join(
-            f"<li{' class=done' if i <= st['step'] else ''}{' aria-current=step' if i == st['step'] else ''}>{s}</li>"
-            for i, s in enumerate(STEPS)) + "</ol>"
-    nxt = f"<p><strong>What's next:</strong> {e(st['next'])}</p>" if st["next"] else ""
-    explain = ""
-    if r.get("details"):
-        explain += "<h2>What it does</h2><ul>" + "".join(f"<li>{e(d)}</li>" for d in r["details"]) + "</ul>"
-    if r.get("changes"):
-        explain += f"<h2>What changes</h2><p>{e(r['changes'])}</p>"
+        track = ""
+    message, _, _ = next_decision(r)
+    nxt = f"<p><strong>Next:</strong> {e(message)}</p>" if message else ""
+    if message:
+        latest = (r.get("latest_action") or {}).get("date") or (r.get("actions") or [r["date"]])[-1][:10]
+        nxt += f'<p class=meta>Based on the record dated {date(latest)}. <a href="{e(r["official_url"])}">Check for updates →</a></p>'
+    paragraphs = [r["summary"], *(r.get("details") or []), r.get("changes", "")]
+    explain = "".join(f'<p{" class=lede" if i == 0 else ""}>{e(p)}</p>' for i, p in enumerate(dict.fromkeys(p for p in paragraphs if p)))
     if r.get("effective"):
-        explain += f"<h2>When it takes effect</h2><p>{e(r['effective'])}</p>"
+        explain += f"<p><strong>Takes effect:</strong> {e(r['effective'])}</p>"
     if r.get("limited"):
         explain += "<p class=meta>So far we only have this bill's official title and description, so there isn't more to explain yet. The full bill is linked below.</p>"
     record = "".join(f"<li>{e(a)}</li>" for a in reversed(r.get("actions") or []))
-    record = f"<p class=meta>From the official record:</p><ul class=meta>{record}</ul>" if record else ""
+    record = f"<ul class=meta>{record}</ul>" if record else ""
     sponsor = ""
     if r.get("sponsor"):
         profile = ""
@@ -1060,21 +1164,20 @@ def bill_page(r, profiles={}):
         sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}{profile}</dd>"
     history = ""
     if len(r["updates"]) > 1:
-        history = "<h2>How it got here</h2><ul class=list>" + "".join(
+        history = "<p>Earlier milestones</p><ul class=list>" + "".join(
             f"<li>{e(u['now'])}<span class=meta>{date(u['date'])}</span></li>" for u in reversed(r["updates"])) + "</ul>"
     home = f"/states/{r['state'].lower()}/" if r.get("state") else "/us/"
     host = urllib.parse.urlparse(r["official_url"]).netloc.removeprefix("www.")
     credit = "<p class=meta>Bill status from <a href=\"https://legiscan.com\">LegiScan</a> (CC BY 4.0).</p>" if "legiscan.com" in host else ""
     body = f"""<p class=eyebrow><a href="{home}">{e(r['where'])}</a> · {e(r['label'])}</p>
 <h1>{e(r['headline'])}</h1>
-<p class=lede>{e(r['summary'])}</p>
 {explain}
-<h2>Where it's at</h2>
-<div class=box>{track}<p><strong>What just happened:</strong> {e(r['happened']) if r.get('happened') else f"{e(st['now'])} <span class=meta>{date(r['date'])}</span>"}</p>{nxt}{record}</div>
+<h2>Where it stands</h2>
+<div class=box>{track}<p>{e(r['happened']) if r.get('happened') else f"{e(st['now'])} <span class=meta>{date(r['date'])}</span>"}</p>{nxt}
+<details><summary>Official history</summary>{record}{history}<p><a href="{e(r['official_url'])}">Full official record →</a></p></details>
+{participation(r, profiles)}</div>
 <h2>The basics</h2>
 <dl><dt>Bill number</dt><dd>{e(r['label'])}</dd><dt>Official name</dt><dd>{e(r['title'])}</dd>{sponsor}</dl>
-{history}
-{participation(r)}
 <a class=official href="{e(r['official_url'])}">Read the full bill on {e(host)} →</a>{credit}"""
     return page(f"{r['headline']} · PlainGov", r["summary"], body, r["id"] + "/")
 
@@ -1083,7 +1186,7 @@ ABOUT = """<h1>About PlainGov</h1>
 <p class=lede>Government moves fast and talks funny. PlainGov keeps up with it for you and explains it in normal words.</p>
 <h2>What we do</h2>
 <p>Every day we check Congress and all 50 state legislatures for bills that are moving: ones that just passed a vote, got signed into law,
-or got vetoed. Then we explain each one in a few plain sentences, with a simple tracker so you can see where it's at.</p>
+or got vetoed. Then we explain each one in short paragraphs, show where it stands, and link to relevant officials so you can get involved.</p>
 <h2>Where it comes from</h2>
 <p>Straight from the source: <a href="https://www.congress.gov">Congress.gov</a> for Congress, and each state legislature's own website
 for the states, using the open-source <a href="https://github.com/openstates/openstates-scrapers">Open States</a> scrapers. For a few states
