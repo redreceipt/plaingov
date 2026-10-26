@@ -160,6 +160,10 @@ for record in ({**ma, "latest_action": {}, "actions": []}, {**rec, "actions": ["
     assert plaingov.next_decision(record)[1] == "", "no guessed chamber"
 received_rec = {**rec, "actions": ["2026-10-22: Received in Senate and referred to the Committee on Finance."]}
 assert plaingov.next_decision(received_rec)[1:] == ("Senate", "Committee on Finance")
+assert 'href="https://www.senate.gov/committees/"' in bill_page(received_rec)
+assert "clerk.house.gov/committees" not in bill_page(received_rec)
+unknown_chamber = bill_page({**rec, "actions": ["2026-10-22: " + referral]})
+assert "clerk.house.gov/committees" in unknown_chamber and "senate.gov/committees/" in unknown_chamber
 for record in ({**ma, "stage": state_stage("MA", 4)}, {**ma, "stage": state_stage("MA", 5)},
                {**ma, "resolution": True}, {**ma, "amendment": True}):
     assert plaingov.next_decision(record) == ("", "", False)

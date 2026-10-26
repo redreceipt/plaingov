@@ -283,7 +283,7 @@ def last_actions(acts):
 
 def action_context(acts):
     """Preserve the latest action's chamber, not the bill's originating chamber."""
-    a = max(enumerate(acts), key=lambda pair: (pair[1]["date"], pair[0]))[1] if acts else {}
+    a = sorted(acts, key=lambda a: a["date"])[-1] if acts else {}
     return {"date": a.get("date", "")[:10], "text": a.get("description", ""), "chamber": org(a.get("organization_id"))}
 
 
@@ -1020,11 +1020,14 @@ def participation(r, profiles={}):
     details = f"{r['where']} · {r['label']}\n{r['title']}\n{r['official_url']}"
     _, chamber, committee = next_decision(r)
     direct = ""
-    if committee:
+    if committee and not r.get("state"):
+        directories = [("House", "https://clerk.house.gov/committees"), ("Senate", "https://www.senate.gov/committees/")]
+        direct = "".join(f'<p><a href="{url}">{ch} committees and contact details →</a></p>' for ch, url in directories if not chamber or ch == chamber)
+    elif committee:
         name = re.sub(r"^(?:the )?committee on ", "", committee, flags=re.I).casefold()
         match = profiles.get("committees", {}).get(name) if r.get("state") == "MA" else None
-        url = match or ("https://malegislature.gov/Committees" if r.get("state") == "MA" else "https://www.congress.gov/committees" if not r.get("state") else r["official_url"])
-        label = "Committee members and contact details" if match else "Find the committee" if r.get("state") in (None, "MA") else "See the committee referral in the official record"
+        url = match or ("https://malegislature.gov/Committees" if r.get("state") == "MA" else r["official_url"])
+        label = "Committee members and contact details" if match else "Find the committee" if r.get("state") == "MA" else "See the committee referral in the official record"
         direct = f'<p><a href="{e(url)}">{label} →</a></p>'
     elif chamber in ("House", "Senate") and (r.get("state") == "MA" or not r.get("state")):
         url = (f"https://malegislature.gov/Legislators/Members/{chamber}" if r.get("state") == "MA" else
