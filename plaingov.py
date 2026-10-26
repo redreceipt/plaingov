@@ -611,7 +611,8 @@ PROMPT = """You write for PlainGov, which explains government to regular people 
 Rules:
 - Use only facts in the source and official actions. Don't guess about effects, costs, or motives, and never invent details.
 - Be concrete everywhere, headline included: name the actual people, places, amounts, ages, deadlines, and limits the source gives. Never write placeholders like "certain places" or "a safety device" when the source says what they are. Don't pad with definitions of general terms (don't explain what an effective date is: give the date).
-- Keep legal conditions and exceptions intact: if protection only applies when conditions are met, say so instead of rounding it to "no penalty".
+- Keep legal conditions and exceptions intact: if protection only applies when conditions are met, say so instead of rounding it to "no penalty". Include the dates used to measure eligibility, ages or residency.
+- Be concise: state each fact once. No filler such as "if they meet the requirements" or a preview of topics explained later. Combine related conditions into short, compact paragraphs. Omit administrative boilerplate unless it affects eligibility, benefits, obligations or timing.
 - Say what's new versus what already existed when the source shows it. "[added: ...]" and "[removed: ...]" mark changed text, and "is amended to read" means existing law is being changed. Don't call something new if the bill only adjusts an existing rule.
 - Neutral and nonpartisan. No opinions, hype, slang, emojis, or hashtags.
 - Everyday words and short sentences, about an 8th-grade reading level. Explain any legal or technical term in a few plain words, and don't cite statute numbers (like "AS 11.81.500" or "section 8-11-155").
@@ -623,7 +624,7 @@ Rules:
 Reply with only a JSON object with these keys:
 "headline": what changes for people, in 4-10 everyday words, sentence case, no period (max 70 characters). Like "Hospitals would have to give you an itemized bill"
 "tweet": one sentence that makes someone stop scrolling, leading with who it affects or what changes for them, in concrete terms (max 140 characters)
-"summary": the opening short paragraph: lead with the practical change and who it affects. This also appears in page listings.
+"summary": one or two short opening sentences: the practical change and who it affects, not a preview of every condition. This also appears in page listings. Do not repeat these facts in details.
 "details": additional short paragraphs continuing the explanation ([] if unnecessary). Together with summary, write the shortest complete explanation, not a list of provisions. Group related facts, remove repetition, and weave in what changes from current law when supported. Keep essential eligibility, amounts, conditions and exceptions. No headings, bullets, generic filler or fixed paragraph count. Do not repeat the effective field or legislative status here.
 "changes": "" (explain supported changes within summary/details instead)
 "effective": when it takes effect, like "September 10, 2026" or "90 days after it becomes law"; prefer a date in the official actions over one in the text ("" if neither says)
@@ -680,7 +681,8 @@ def rewrite(rec):
         out = {k: [" ".join(str(x).split()) for x in (v if isinstance(v, list) else [v] if v else [])] if k == "details"
                else bool(v) if k == "limited" else " ".join(str(v).split()) for k, v in out.items() if k in REWRITE_KEYS}
         problems = []
-        if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't)\b", out.get("summary", "") + out.get("tweet", ""), re.I):
+        prose = " ".join([out.get("summary", ""), out.get("tweet", ""), *out.get("details", []), out.get("changes", "")])
+        if re.search(r"\b(the|this) source\b|\bsource text\b|\bfull text\b|\b(text|title) (does not|doesn't|is available)\b|\bonly (the )?title\b", prose, re.I):
             problems.append("It talks about the source instead of the bill.")
         if not all(out.get(k) for k in ("headline", "tweet", "summary")):
             problems.append("headline, tweet, and summary are required.")

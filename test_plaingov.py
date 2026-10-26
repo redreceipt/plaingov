@@ -361,6 +361,19 @@ calls.clear()
 rewrite({**rec, "resolution": True, "stage": {"step": 2, "short": "Adopted", "now": "Adopted", "next": ""}, "source": "A resolution urging action."})
 assert "This is a resolution, not an enacted law." in calls[0][1] and "This is NOT law yet" not in calls[0][1]
 
+original_ask = plaingov.ask_json
+try:
+    prompts = []
+    answers = [{**r, "details": ["Only the title is available."]}, r, {"vague": False, "unsupported": []}]
+    def answer(prompt, *args):
+        prompts.append(prompt)
+        return answers.pop(0)
+    plaingov.ask_json = answer
+    rewrite({**ma, "source": "A property tax exemption."})
+    assert "It talks about the source" in prompts[1] and "Chamber for the latest action: Senate" in prompts[0]
+finally:
+    plaingov.ask_json = original_ask
+
 # Pages show the specifics, the official record, and say so when we only have a title.
 p = bill_page({**rec, "details": ["Under 21 days old."], "changes": "Adds drop boxes.", "effective": "September 10, 2026",
                "happened": "The Governor signed it on September 9, 2026.", "actions": ["2026-09-09: SIGNED INTO LAW"], "limited": True})
