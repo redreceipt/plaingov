@@ -147,7 +147,7 @@ assert "https://malegislature.gov/Search/FindMyLegislator" in plaingov.participa
 # Next steps use the latest action, never the sponsor or bill prefix.
 ma = {**rec, "state": "MA", "where": "Massachusetts", "stage": state_stage("MA", 2, "lower"),
       "latest_action": {"date": "2026-10-22", "text": "Read; and placed in the Orders of the Day for the next session", "chamber": "upper"}}
-assert plaingov.next_decision(ma) == ("With the Senate. Its next vote date is not verified.", "Senate", False)
+assert plaingov.next_decision(ma) == ("With the Senate. No vote date confirmed.", "Senate", False)
 assert "Legislators/Members/Senate" in bill_page(ma)
 assert "Massachusetts Senate" in bill_page(ma) and "Oct 22, 2026" in bill_page(ma)
 committee = {**ma, "latest_action": {"date": "2026-10-22", "text": "Referred to the committee on Ways and Means", "chamber": "upper"}}

@@ -899,6 +899,7 @@ dt{color:var(--soft)}dd{margin:0}
 .list{list-style:none;padding:0;margin:0}
 .list li{border-bottom:1px solid var(--line);padding:.8rem 0}
 .list a{font-weight:600;text-decoration:none;color:var(--ink)}.list a:hover{text-decoration:underline}
+.contacts a{color:var(--accent);text-decoration:underline}
 .meta{display:block;color:var(--soft);font-size:.85rem}
 .more{display:inline-block;margin-top:.75rem;font-weight:600}
 .grid{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.5rem}
@@ -991,12 +992,12 @@ def next_decision(r):
     referral = re.search(r"\breferred to (?:the )?(.+?)(?:\.\s|\.$|;|$)", text, re.I)
     if referral and re.search(r"\bcommittee\b", referral[1], re.I):
         name = referral[1].rstrip(".")
-        return f"With {name}. A hearing or vote date is not verified.", chamber, name
+        return f"With {name}. No hearing or vote date confirmed.", chamber, name
     if re.search(r"\b(?:presented|sent|transmitted|delivered) to (?:the )?(Governor|President)\b", text, re.I):
         office = "Governor" if r.get("state") else "President"
         return f"Awaiting the {office}'s decision.", office, False
     if chamber and re.search(r"Orders of the Day|placed on.*calendar|Received in|Introduced in", text, re.I):
-        return f"With the {chamber}. Its next vote date is not verified.", chamber, False
+        return f"With the {chamber}. No vote date confirmed.", chamber, False
     if st["step"] == 1 and re.match(r"Passed(?:/agreed to)?\b", text, re.I):
         passed = st["short"].removeprefix("Passed the ")
         if passed in ("House", "Assembly", "Senate"):
@@ -1037,12 +1038,12 @@ def participation(r, profiles={}):
         if members:
             rows = []
             for member in members:
-                contact = (f' · <a href="tel:+1{member["phone"]}">Call {e(member["name"])}</a>' if member["phone"] else "")
-                contact += (f' · <a href="mailto:{e(member["email"])}">Email {e(member["name"])}</a>' if member["email"] else "")
+                contact = (f' · <a href="tel:+1{member["phone"]}" aria-label="Call {e(member["name"])}">Call</a>' if member["phone"] else "")
+                contact += (f' · <a href="mailto:{e(member["email"])}" aria-label="Email {e(member["name"])}">Email</a>' if member["email"] else "")
                 rows.append(f'<li><a href="https://malegislature.gov/Legislators/Profile/{member["id"]}">{e(member["name"])}</a>{contact}</li>')
             direct += (f'<details><summary>See {len(members)} {chamber} members here</summary>'
                        '<p class=meta>These are current chamber members, not a list of lawmakers opposing or delaying this bill.</p>'
-                       '<ul class=list>' + "".join(rows) + '</ul>'
+                       '<ul class="list contacts">' + "".join(rows) + '</ul>'
                        f'<p class=meta>Official roster checked {date(profiles["checked"])}</p></details>')
     elif chamber == "President":
         direct = '<p><a href="https://www.whitehouse.gov/contact/">Contact the President’s office →</a></p>'
