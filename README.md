@@ -70,7 +70,7 @@ Explanations are short paragraphs, with essential conditions and effective dates
 
 The status card shows the latest explained action, an evidence-based next step, and expandable official history. State ingestion preserves the latest action’s chamber; an unknown chamber stays unknown. A normal procedural next step is not a scheduled vote. Enacted bills, vetoes, resolutions and constitutional amendments do not receive a generic passage CTA.
 
-Massachusetts pages link to the relevant chamber or committee directory. For chamber-stage bills, readers can expand current members’ names and public office phone/email links directly on the page. Contacts come from the same official roster row as the member’s profile ID, never name matching. Congress links to official chamber/committee directories; verified executive referrals link to the White House or Massachusetts Governor. Other jurisdictions and unknown districts retain official lookup tools. No calls or messages are sent automatically.
+Massachusetts pages link to the relevant chamber or an exactly matched committee page from the official directory; unmatched committees retain the directory fallback. For chamber-stage bills, readers can expand current members’ names and public office phone/email links directly on the page. Contacts come from the same official roster row as the member’s profile ID, never name matching. Congress links to official chamber/committee directories; verified executive referrals link to the White House or Massachusetts Governor. Other jurisdictions and unknown districts retain official lookup tools. No calls or messages are sent automatically.
 
 ## Sponsor links
 
@@ -78,7 +78,7 @@ Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them agai
 
 The state pilot covers Massachusetts House and Senate members. Ingestion reads the explicit Presenter profile link on the official bill page, checks its displayed name against the scraper's sole primary sponsor, and preserves its profile ID. Rebuilds check that ID against the current official chamber directories. Committees, multiple presenters, mismatches and former members stay unlinked. Resolved Open States person IDs are also preserved; name placeholders are not IDs. Other states retain official representative finders, not guessed sponsor profiles.
 
-Roster failures omit affected links; no cached membership is reused. Rebuilds make up to four public roster requests: federal rosters when sponsor IDs are present and Massachusetts rosters when MA pages are present; MA ingestion adds one bill-page request. Each has a 10-second timeout. Existing records acquire IDs on subsequent ingestion; metadata-only rollout enrichment needs no AI rewrite or repost. No calls or messages are sent, and PlainGov collects no addresses.
+Roster failures omit affected links; no cached membership is reused. Rebuilds make up to five public directory requests: federal rosters when sponsor IDs are present and Massachusetts member/committee directories when MA pages are present; MA ingestion adds one bill-page request. Each has a 10-second timeout. Existing records acquire IDs on subsequent ingestion; metadata-only rollout enrichment needs no AI rewrite or repost. No calls or messages are sent, and PlainGov collects no addresses.
 
 ## Deploy
 

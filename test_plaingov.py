@@ -154,10 +154,12 @@ committee = {**ma, "latest_action": {"date": "2026-10-22", "text": "Referred to 
 assert plaingov.next_decision(committee)[2] and "Ways and Means" in bill_page(committee)
 assert 'href="https://malegislature.gov/Committees"' in bill_page(committee)
 assert "Legislators/Members/Senate" not in bill_page(committee), "do not substitute the full chamber for a committee"
+assert 'href="https://malegislature.gov/Committees/Detail/J39"' in bill_page(committee, {"committees": {"ways and means": "https://malegislature.gov/Committees/Detail/J39"}})
+assert 'href="https://malegislature.gov/Committees"' in bill_page(committee, {"committees": {"ways and means": None}})
 for record in ({**ma, "latest_action": {}, "actions": []}, {**rec, "actions": ["2026-10-22: " + referral]}):
     assert plaingov.next_decision(record)[1] == "", "no guessed chamber"
 received_rec = {**rec, "actions": ["2026-10-22: Received in Senate and referred to the Committee on Finance."]}
-assert plaingov.next_decision(received_rec)[1:] == ("Senate", True)
+assert plaingov.next_decision(received_rec)[1:] == ("Senate", "Committee on Finance")
 for record in ({**ma, "stage": state_stage("MA", 4)}, {**ma, "stage": state_stage("MA", 5)},
                {**ma, "resolution": True}, {**ma, "amendment": True}):
     assert plaingov.next_decision(record) == ("", "", False)
