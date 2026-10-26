@@ -666,6 +666,10 @@ def rewrite(rec):
     STAGE_MODEL (more precise, less plain) a last one. A rewrite that still fails raises, so the bill is tried again next
     run instead of publishing something vague or wrong."""
     actions = "\n".join(rec.get("actions") or [f"{rec['date']}: {rec['stage']['now']}"])
+    chamber = {"upper": "Senate", "lower": "Assembly" if rec.get("state") in ASSEMBLY else "House",
+               "legislature": "Legislature"}.get((rec.get("latest_action") or {}).get("chamber"))
+    if chamber:
+        actions += f"\nChamber for the latest action: {chamber}."
     prompt = PROMPT.format(**{**rec, "actions": actions, "status": rec["stage"]["now"] + (
         " This is a constitutional amendment proposal, not an enacted law." if rec.get("amendment")
         else " This is a resolution, not an enacted law. Describe its requests or position, not legal requirements." if rec.get("resolution")
@@ -1012,7 +1016,7 @@ def participation(r, profiles={}):
     else:
         links = [("Find your state representatives through USA.gov", "https://www.usa.gov/elected-officials")]
     details = f"{r['where']} · {r['label']}\n{r['title']}\n{r['official_url']}"
-    message, chamber, committee = next_decision(r)
+    _, chamber, committee = next_decision(r)
     direct = ""
     if committee:
         url = "https://malegislature.gov/Committees" if r.get("state") == "MA" else "https://www.congress.gov/committees" if not r.get("state") else r["official_url"]
