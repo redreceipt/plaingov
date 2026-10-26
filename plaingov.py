@@ -639,7 +639,7 @@ Source: {source}"""
 
 CHECK_PROMPT = """Check this plain-English explanation of a bill against its official source and actions. Reply with only JSON: {{"vague": true or false, "unsupported": ["..."]}}
 Status: {status}
-- unsupported: also flag a missing condition or exception that makes the explanation materially misleading; concision must not broaden eligibility or legal effects.
+- Evaluate summary, details and effective together. Flag an omitted condition only when it materially broadens eligibility or legal effects. Omitting secondary provisions is fine. Headlines and tweets are brief previews: they need not repeat conditions explained on the page, but must not promise an unconditional entitlement.
 - vague: true only if it stays at the level of the topic (names the subject, or uses placeholders like "certain places" or "a safety device") when the source says what the bill actually requires, allows, or covers. Leaving out some details is fine.
 - unsupported: each claim that the source or actions don't support, including overstated legal effects, and wording that doesn't match the status (a law described with "would", or a proposal described as if it were law). Plain rewording is fine. [] if none.
 
