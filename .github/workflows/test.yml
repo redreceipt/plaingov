@@ -14,3 +14,4 @@ jobs:
           python3 test_plaingov.py
           python3 test_state_rosters.py
           python3 test_sponsors.py
+          python3 test_state_feeds.py

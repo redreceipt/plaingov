@@ -65,8 +65,15 @@ def strip(s):
 def doc_text(url):
     """A bill version's text. PDFs go through pdftotext (poppler-utils); in HTML, changed text is marked
     [added: ...] / [removed: ...] so the rewrite can tell what's new."""
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=120) as r:
-        return doc_bytes_text(r.read(), r.headers.get_content_charset())
+    parsed = urllib.parse.urlsplit(url)
+    indiana_pdf = parsed.hostname == "iga.in.gov" and parsed.path.lower().endswith(".pdf")
+    # Indiana serves its HTML app shell instead of a PDF to non-browser user agents.
+    req = urllib.request.Request(url, headers={"User-Agent": f"Mozilla/5.0 {UA}" if indiana_pdf else UA})
+    with (https_open(req, 120) if parsed.scheme == "https" else urllib.request.urlopen(req, timeout=120)) as r:
+        data = r.read()
+        if indiana_pdf and not data.startswith(b"%PDF-"):
+            raise ValueError("Indiana returned a non-PDF bill document")
+        return doc_bytes_text(data, r.headers.get_content_charset())
 
 
 def doc_bytes_text(data, charset=None):
@@ -306,7 +313,17 @@ def action_context(acts):
 
 
 def state_id(b):
-    return f"states/{b['state'].lower()}/{slug(b['legislative_session'])}-{slug(b['identifier'])}"
+    prefix = f"states/{b['state'].lower()}/{slug(b['legislative_session'])}-"
+    if b["state"] in {"IN", "VA"}:
+        # Preserve published URLs across native/LegiScan spacing and zero-padding differences.
+        base = f"{DATA}/bills/"
+        ids = [p[len(base):-5] for p in glob.glob(f"{base}{prefix}*.json")
+               if bill_num(p[len(base + prefix):-5]) == bill_num(b["identifier"])]
+        if len(ids) > 1:
+            raise ValueError(f"Ambiguous saved bill: {b['state']} {b['legislative_session']} {b['identifier']}")
+        if ids:
+            return ids[0]
+    return prefix + slug(b["identifier"])
 
 
 def ma_sponsor(b):
@@ -760,7 +777,8 @@ def legiscan_items(st, known=None):
 
 
 def legiscan_id(b):
-    return f"states/{b['state'].lower()}/{slug(b.get('_session') or b['url'].rstrip('/').rsplit('/', 1)[-1])}-{slug(b['number'])}"
+    return state_id({"state": b["state"], "legislative_session": b.get("_session") or b["url"].rstrip('/').rsplit('/', 1)[-1],
+                     "identifier": b["number"]})
 
 
 def legiscan_update(b):
@@ -853,7 +871,7 @@ def scrape_state(st):
     subprocess.run(["docker", "rm", "-f", box], capture_output=True)  # left over if the daemon restarted mid-scrape
     cmd = ["docker", "run", "--rm", "--name", box, "-v", f"{out}:/data",
            "-v", f"{os.path.dirname(os.path.abspath(__file__))}/scrapers:/plaingov:ro", "-e", "PYTHONPATH=/plaingov:./scrapers", "-e", f"USER_AGENT={UA}",  # ./scrapers: the images' own
-           *[a for k in KEYS.values() if os.environ.get(k) for a in ("-e", k)],
+           *(["-e", KEYS[st]] if st in KEYS else []),
            *([CA_IMAGE] if st == "CA" else [SCRAPER_IMAGE, st.lower()]), "bills", "--scrape", "--datadir", "/data", "--rpm", str(RPM.get(st, 60))]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=22 * 3600)
@@ -875,9 +893,20 @@ def scrape_state(st):
     stats = {}
     if status == "ok":
         ai = ai_stages(st)
+        if st in {"IN", "VA"} and prev.get("source") == "LegiScan":
+            path = f"{DATA}/state/states-{st.lower()}.json"
+            if os.path.exists(path):
+                seen = set(load(path, []))
+                # The source changes milestone keys, not pages; don't rewrite/repost an unchanged milestone.
+                for key, item in state_items(st, ai):
+                    rec = load(f"{DATA}/bills/{state_id(item)}.json", {})
+                    if (rec.get("state") == st and rec.get("date") == item["_date"]
+                            and rec.get("stage") == state_stage(st, *item["status"][:2])):
+                        seen.add(key)
+                write(path, json.dumps(sorted(seen)))
         new, done, failed = process(f"states-{st.lower()}", state_items(st, ai), state_update)
         save_ids(st, ai)
-        stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed, "backup": ""}
+        stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed, "backup": "", "source": "legislature"}
     h = set_health(st, status=status, error=error[-800:], last_end=time.time(), site=site, **stats)
     if status == "failed" and prev.get("status") != "failed":
         up = site_status(site)
