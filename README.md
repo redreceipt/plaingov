@@ -31,10 +31,14 @@ python3 plaingov.py scrape SC  # scrape one state now
 python3 plaingov.py post       # post the most interesting queued update to @plaingov
 python3 plaingov.py site       # rebuild the static site
 python3 plaingov.py restage    # repair saved status fields + rebuild; no AI calls or posts
+python3 plaingov.py sponsors CA # enrich existing scraped sponsor IDs for one state; no AI/posts
 python3 plaingov.py refresh    # rewrite existing pages after a prompt change (PROMPT_VERSION)
 python3 plaingov.py catchup    # pages for each state's 25 most recent laws and vetoes this year (no posts)
 python3 plaingov.py report     # X engagement for the last 7 days (emailed weekly by the hourly post run)
 python3 test_plaingov.py       # self-check
+python3 test_state_rosters.py  # state roster parsers and current-office gates
+python3 test_sponsors.py       # identity joins, transport, cache and enrichment
+python3 test_state_feeds.py    # keyed feeds, cutover and bill documents
 ```
 
 A feed's first run builds pages for what's already listed and queues no posts. Milestone posts link to the bill's page; other posts don't (X charges far more for posts with links). Posts go out 8am–9pm Eastern, spread evenly, since a new post's first hours decide its reach on X. Data and the generated site live in `~/plaingov-data`; `plaingov-web.service` serves it, and a Vercel project in front of plaingov.com proxies to it for Vercel Analytics.
@@ -48,13 +52,21 @@ Environment (`~/plaingov.env` on the VM, never committed):
 | Variable | Purpose |
 |---|---|
 | `CONGRESS_API_KEY` | [api.data.gov key](https://api.congress.gov/sign-up/) |
-| `NEW_YORK_API_KEY`, `INDIANA_API_KEY`, `VA_API_KEY` | free keys some state scrapers need |
+| `NEW_YORK_API_KEY` | New York's free legislative API key |
+| `INDIANA_API_KEY` | activated IGA token from `apitoken.request@iga.in.gov` ([docs](https://docs.api.iga.in.gov/)) |
+| `VA_API_KEY` | activated Virginia LIS Partner API key ([registration](https://lis.virginia.gov/developers)); registration confirmation alone is not a key |
 | `LEGISCAN_API_KEY` | [LegiScan](https://legiscan.com/legiscan) key: sites that block us (IL, AK, NH), states waiting on keys, and backup while a scraper fails |
 | `ALERT_EMAIL` | where scraper alerts go (exe.dev only emails the VM owner) |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | @plaingov's OAuth 1.0a keys (read+write) |
 | `DRY_RUN` | `1` (default) prints posts instead of sending |
 | `MAX_PAGES_PER_DAY` | new AI-written pages per day across all feeds (default 200, about $0.80); newest first, the rest wait |
 | `MAX_POSTS_PER_DAY`, `MIN_INTEREST`, `BACKFILL_DAYS`, `PARALLEL`, `RESCRAPE_HOURS`, `SITE_URL`, `LLM_MODEL`, `STAGE_MODEL`, `JEV_MODEL`, `DATA_DIR` | optional overrides |
+
+### Indiana / Virginia activation
+
+Keep activated tokens in `~/plaingov.env` (mode `600`), never Git, PR evidence or command-line arguments. A missing key keeps the state on LegiScan. Only the selected state's key enters its scraper container. The container hook enforces verified HTTPS for both official APIs, overriding upstream's obsolete certificate bypasses. Indiana PDF requests use a browser-compatible PlainGov User-Agent; an HTML app shell is not accepted as bill text.
+
+Deploy the code before adding keys and restarting `plaingov-scrape`; adding keys to the running daemon's environment file alone does not reload them. No feed data needs deletion. On the first successful native scrape after LegiScan, existing same-session bill URLs survive number-spacing/zero-padding differences, and already-published identical milestones are marked seen under their native keys without rewriting prose or replaying posts. Old seen keys and posting history remain intact; changed/new milestones use normal ingestion. Ambiguous saved bill IDs fail rather than guessing.
 
 ## Monitoring
 
@@ -76,9 +88,13 @@ Massachusetts pages link to the relevant chamber or an exactly matched committee
 
 Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them against the [House Clerk](https://clerk.house.gov/xml/lists/MemberData.xml) and [Senate](https://www.senate.gov/general/contact_information/senators_cfm.xml) current-member rosters. Verified matches link to official profiles/contact pages with the roster and check date. Senators link to Senate.gov's state contact directory, which lists both senators and their office details; individual senator sites blocked automated verification. The sponsor may not represent the reader.
 
-The state pilot covers Massachusetts House and Senate members. Ingestion reads the explicit Presenter profile link on the official bill page, checks its displayed name against the scraper's sole primary sponsor, and preserves its profile ID. Rebuilds check that ID against the current official chamber directories. Committees, multiple presenters, mismatches and former members stay unlinked. Resolved Open States person IDs are also preserved; name placeholders are not IDs. Other states retain official representative finders, not guessed sponsor profiles.
+Massachusetts retains its explicit official Presenter/current-directory check. Other states join LegiScan person IDs to Open States person IDs using shared Vote Smart/Ballotpedia identifiers, then require the same explicit profile URL/ID and full name on a current official legislative roster. Names and district URLs never establish a person's identity. Ingestion matches the exact state, session and bill number; ambiguous sessions, committees, conflicting identities and display-name mismatches stay unlinked.
 
-Roster failures omit affected links; no cached membership is reused. Rebuilds make up to five public directory requests: federal rosters when sponsor IDs are present and Massachusetts member/committee directories when MA pages are present; MA ingestion adds one bill-page request. Each has a 10-second timeout. Existing records acquire IDs on subsequent ingestion; metadata-only rollout enrichment needs no AI rewrite or repost. No calls or messages are sent, and PlainGov collects no addresses.
+`state_rosters.py` covers all 50 states, but coverage is evidence-dependent, not a promise of a link for every sponsor. Alabama, Hawaii and Idaho use labeled official directories. Oklahoma Senate is currently unsupported; Utah and New Hampshire House may establish membership without a usable destination. Blocked sources, former members and uncertain matches keep plain sponsor text and official representative finders. No guessed X profiles are added.
+
+State identity/official-source lookups share a disk cache (up to 24 hours; failures one hour), with no expired-evidence fallback. Open States identity CSVs must be published within seven days; current office still requires the official roster. Supplemental LegiScan lookups are capped at 200/day across workers, separate from existing feed queries. HTTPS redirects cannot downgrade to HTTP. Roster requests use verified TLS and a 20-second timeout; bundled intermediates complete missing chains without adding trust anchors. Federal/MA rosters remain uncached.
+
+For existing native-scraped pages, stop feed jobs and back up the data before running `python3 plaingov.py sponsors CA` (one state at a time), then `python3 plaingov.py site`. Enrichment streams saved bill files, changes only sponsor identifiers, and leaves prose, prompt version, queue, seen keys and posting history unchanged. The shared lookup cap bounds requests; rerun on later days for remaining bills. LegiScan-only historical pages gain IDs on subsequent ingestion. No calls or messages are sent, and PlainGov collects no addresses.
 
 ## Deploy
 
