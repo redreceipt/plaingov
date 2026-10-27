@@ -111,7 +111,8 @@ try:
     plaingov.fetch = roster_fetch
     house = plaingov.house_members()
     assert house["ids"] == {"K000389"} and house["congress"] == 119
-    assert requests == [("https://clerk.house.gov/xml/lists/MemberData.xml", {"timeout": 10})]
+    assert [url for url, _ in requests] == ["https://clerk.house.gov/xml/lists/MemberData.xml"]
+    assert requests[0][1]["timeout"] == 20 and requests[0][1]["context"].check_hostname
     house = plaingov.sponsor_profiles([current])
     p = bill_page(current, house)
     assert 'href="https://clerk.house.gov/members/K000389"' in p and "119th Congress · roster checked" in p
@@ -245,7 +246,7 @@ try:
     ma_rec = {**rec, "state": "MA", "sponsor_profile_id": "CMG1"}
     senate_rec = {**rec, "sponsor_bioguide_id": "S001150"}
     def official_fetch(url, **kwargs):
-        assert kwargs["timeout"] == 10
+        assert kwargs["timeout"] == 20 and kwargs["context"].check_hostname
         if "clerk.house.gov" in url: return roster
         if "senate.gov/general" in url: return senator
         if url.endswith("/House"): return '<a href="/Legislators/Profile/CMG1">Garry</a>'
@@ -284,7 +285,8 @@ assert (ls["id"], ls["label"], ls["stage"]["short"], ls["source"]) == ("states/i
 assert "LegiScan" in bill_page({**rec, **ls, "headline": "h", "summary": "s", "updates": []})
 
 # A broken scraper's LegiScan backup reuses the scraper's bill IDs and post keys, and only adds newer milestones.
-plaingov.DATA = tempfile.mkdtemp()
+temporary_data = tempfile.TemporaryDirectory()
+plaingov.DATA = temporary_data.name
 os.makedirs(f"{plaingov.DATA}/scrape/sc/sc")
 for i, (sess, ident, acts) in enumerate([("2025-2026", "H 3305", [act("2026-02-01", ["passage"], LOW)]), ("2025-2026", "S 12", []),
                                          ("2025-2026", "S 99", []), ("2025e1", "H 3305", [])]):
@@ -549,4 +551,5 @@ try:
 finally:
     plaingov.time.time, plaingov.x_api = original_time, original_x_api
     plaingov.post_best, plaingov.report = original_post_best, original_report
+temporary_data.cleanup()
 print("ok")

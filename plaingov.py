@@ -6,6 +6,7 @@ Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post qu
        plaingov.py post       post the most interesting queued update to X (@plaingov)
        plaingov.py site       rebuild the site only
        plaingov.py restage    repair saved status fields without AI calls or posts
+       plaingov.py sponsors ST enrich existing scraped sponsor IDs; no AI calls or posts
        plaingov.py refresh    rewrite existing pages from before the current prompt (PROMPT_VERSION)
        plaingov.py catchup    pages for each state's 25 most recent laws and vetoes this year (no posts)
        plaingov.py report     X engagement for the last 7 days (the hourly post run sends it weekly)
@@ -34,9 +35,26 @@ UA = "PlainGov/1.0 (+https://plaingov.com/about/)"  # some legislatures (PA, MI)
 URL_LEN = 23  # X counts every link as 23 chars
 
 
-def fetch(url, data=None, headers={}, timeout=120):
+class HTTPSOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            fp.close()
+            raise ValueError("non-HTTPS redirect")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def https_open(req, timeout, context=None):
+    if urllib.parse.urlsplit(req.full_url).scheme != "https":
+        raise ValueError("HTTPS required")
+    return urllib.request.build_opener(HTTPSOnlyRedirect(), urllib.request.HTTPSHandler(context=context)).open(req, timeout=timeout)
+
+
+def fetch(url, data=None, headers={}, timeout=120, context=None):
     req = urllib.request.Request(url, data=data, headers={"User-Agent": UA, **headers})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with (https_open(req, timeout, context) if context is not None or urllib.parse.urlsplit(url).scheme == "https"
+          else urllib.request.urlopen(req, timeout=timeout)) as r:
+        if context and urllib.parse.urlsplit(r.url).scheme != "https":
+            raise ValueError("HTTPS source redirected to unverified transport")
         return r.read().decode(r.headers.get_content_charset() or "utf-8", "replace")
 
 
@@ -310,6 +328,318 @@ def ma_sponsor(b):
     return None
 
 
+def sponsor_cache(key, read, ttl=86400):
+    """Share bounded, fail-closed lookups across feed workers and hourly jobs."""
+    directory = f"{DATA}/state/sponsor-cache"
+    os.makedirs(directory, exist_ok=True)
+    with open(f"{directory}/.lock", "w") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        path = f"{directory}/{hashlib.sha256(key.encode()).hexdigest()}.json"
+        now = time.time()
+        try:
+            cached = load(path, {})
+        except (OSError, ValueError):
+            cached = {}
+        if isinstance(cached, dict) and "value" in cached and isinstance(cached.get("at"), (int, float)) and 0 <= now - cached["at"] < (ttl if cached["value"] is not None else 3600):
+            return cached["value"]
+        try:
+            if key.startswith("legiscan:"):
+                budget_path, day = f"{directory}/budget.json", time.strftime("%Y-%m-%d", time.gmtime(now))
+                budget = load(budget_path, {})
+                if budget.get("day") != day:
+                    budget = {"day": day, "queries": 0}
+                    for old in glob.glob(f"{directory}/*.json"):
+                        if now - os.path.getmtime(old) > 7 * 86400:
+                            os.unlink(old)
+                if budget["queries"] >= 200:
+                    raise RuntimeError("daily sponsor lookup budget exhausted")
+                budget["queries"] += 1
+                write(budget_path, json.dumps(budget))
+            value = read()
+        except Exception as ex:
+            print(f"Sponsor lookup unavailable ({key}): {type(ex).__name__}", file=sys.stderr, flush=True)
+            value = None
+        write(path, json.dumps({"at": now, "value": value}))
+        return value
+
+
+def sponsor_api(op, **args):
+    def read():
+        q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], "op": op, **args})
+        value = json.loads(fetch(f"https://api.legiscan.com/?{q}", timeout=10))
+        if value.get("status") != "OK":
+            raise ValueError("LegiScan response was not OK")
+        if op == "getBill":
+            b = value["bill"]
+            value = {"bill": {k: b.get(k) for k in ("bill_id", "state", "bill_number", "session", "sponsors")}}
+        return value
+    cache_args = {k: hashlib.sha256(str(v).encode()).hexdigest() if k == "access_key" else v for k, v in args.items()}
+    return sponsor_cache("legiscan:" + op + ":" + json.dumps(cache_args, sort_keys=True), read,
+                         7 * 86400 if op == "getSessionList" else 86400) or {}
+
+
+def state_people(st):
+    import csv, io, email.utils
+    if st not in STATES:
+        return []
+    def read():
+        url = f"https://data.openstates.org/people/current/{st.lower()}.csv"
+        with https_open(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=10) as response:
+            published = email.utils.parsedate_to_datetime(response.headers["Last-Modified"]).timestamp()
+            rows = list(csv.DictReader(io.StringIO(response.read().decode("utf-8"))))
+        if not -300 <= time.time() - published < 7 * 86400:
+            raise ValueError("stale current-member roster")
+        if not rows or not {"id", "links", "sources", "current_chamber", "name", "death_date"} <= rows[0].keys():
+            raise ValueError("invalid current-member roster")
+        people = [{k: r.get(k, "") for k in ("id", "name", "sources", "links", "current_chamber")} for r in rows
+                  if re.fullmatch(r"ocd-person/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", r["id"])
+                  and r["current_chamber"] in ("upper", "lower", "legislature")
+                  and not r.get("death_date")]
+        return {"people": people, "published": published}
+    data = sponsor_cache(f"people:{st}", read) or {}
+    return data.get("people", []) if -300 <= time.time() - data.get("published", 0) < 7 * 86400 else []
+
+
+def person_refs(votesmart=None, ballotpedia=None, sources=()):
+    """Shared entity identifiers, never display-name matching or district URL matching."""
+    refs = set()
+    if str(votesmart or "").isdigit() and int(votesmart) > 0:
+        refs.add(("votesmart", str(int(votesmart))))
+    if isinstance(ballotpedia, str) and ballotpedia:
+        refs.add(("ballotpedia", urllib.parse.unquote(ballotpedia).strip("/")))
+    for source in sources:
+        try:
+            u = urllib.parse.urlsplit(source)
+        except ValueError:
+            continue
+        if u.hostname in ("votesmart.org", "www.votesmart.org", "justfacts.votesmart.org"):
+            if m := re.fullmatch(r"/candidate/(?:biography/)?([0-9]+)(?:/[^/]*)?/?", u.path):
+                refs.add(("votesmart", str(int(m[1]))))
+        elif u.hostname in ("ballotpedia.org", "www.ballotpedia.org"):
+            refs.add(("ballotpedia", urllib.parse.unquote(u.path).strip("/")))
+    return refs
+
+
+def roster_fetch(url, data=None, headers={}):
+    import ssl
+    source = urllib.parse.urlsplit(url)
+    if source.scheme != "https":
+        raise ValueError("roster evidence requires HTTPS")
+    context = ssl.create_default_context()
+    context.set_alpn_protocols(["http/1.1"])  # urllib only sets this automatically when no context is supplied.
+    # Complete omitted chains without trusting an intermediate as a new root.
+    context.verify_flags = (context.verify_flags | ssl.VERIFY_X509_STRICT) & ~ssl.VERIFY_X509_PARTIAL_CHAIN
+    if source.hostname in ("www.cga.ct.gov", "www.house.mi.gov", "my.ilga.gov", "www.legislature.ms.gov", "billstatus.ls.state.ms.us"):
+        context.load_verify_locations(cafile=os.path.join(os.path.dirname(__file__), "roster-intermediates.pem"))
+    return fetch(url, data=data, headers=headers, timeout=20, context=context)
+
+
+def state_profiles(st, identities):
+    """Recheck office and refresh official URLs; never reuse a district URL as a person's identity."""
+    from collections import Counter
+    from state_rosters import members, member_key, member_name
+    if st not in STATES or not os.environ.get("LEGISCAN_API_KEY"):
+        return {}
+    people = state_people(st)
+    sessions = sponsor_api("getSessionList", state=st).get("sessions", [])
+    year = int(time.strftime("%Y", time.gmtime()))
+    regular = [s for s in sessions if s.get("state_abbr") == st and s["year_start"] <= year and not s.get("prefile") and not s.get("special")
+               and not re.search(r"special|extra", s.get("session_title", ""), re.I)]
+    if not people or not regular:
+        return {}
+    session = max(regular, key=lambda s: s["year_start"])
+    roster = sponsor_api("getSessionPeople", id=session["session_id"]).get("sessionpeople", {})
+    if (roster.get("session", {}).get("state_id"), roster.get("session", {}).get("session_id")) != (session["state_id"], session["session_id"]):
+        return {}
+    references, owners = {}, {}
+    for i, person in enumerate(people):
+        for ref in person_refs(sources=person["sources"].split(";")):
+            references.setdefault(ref, set()).add(i)
+        owners.setdefault(member_name(person["name"]), set()).add(f"{st}:{person['id']}")
+    resolved = []
+    for s in roster.get("people", []):
+        if s.get("committee_sponsor") or s.get("state_id") != session["state_id"] or type(s.get("people_id")) is not int or s["people_id"] <= 0:
+            continue
+        refs = person_refs(s.get("votesmart_id"), s.get("ballotpedia"))
+        matches = set().union(*(references.get(ref, set()) for ref in refs))
+        if len(matches) != 1:
+            continue
+        person = people[matches.pop()]
+        if person["current_chamber"] != ({"Sen": "upper", "Rep": "lower"}.get(s.get("role")) if st != "NE" else "legislature"):
+            continue
+        resolved.append((s, person))
+    ids, ocd_ids = Counter(s.get("people_id") for s in roster.get("people", [])), Counter(r["id"] for _, r in resolved)
+    wanted = []
+    for s, person in resolved:
+        keys = (f"{st}:ls:{s['people_id']}", f"{st}:{person['id']}")
+        bio = s.get("bio") or {}
+        url = html.unescape((bio.get("social") or {}).get("biography") or ((bio.get("links") or {}).get("official") or {}).get("website") or "")
+        names = {member_name(name) for name in (s["name"], person["name"],
+                 " ".join(s.get(k) or "" for k in ("first_name", "middle_name", "last_name", "suffix")))} - {""}
+        candidates = [url, *person["links"].split(";"), *person["sources"].split(";")]
+        for name in names:
+            owners.setdefault(name, set()).add(keys[1])
+        if ids[s["people_id"]] == 1 and ocd_ids[person["id"]] == 1 and identities.intersection(keys):
+            wanted.append((keys, names, candidates, s["name"], member_name(s.get("last_name") or "")))
+    if not wanted:
+        return {}
+    def government(url, data=None, headers={}):
+        # Georgia uses the same anonymous, short-lived token protocol as our existing bill scraper.
+        if urllib.parse.urlsplit(url).path == "/api/authentication/token":
+            return roster_fetch(url, data=data, headers=headers)
+        key = "roster:" + urllib.parse.urlsplit(url).netloc + ":" + hashlib.sha256(url.encode() + (data or b"")).hexdigest()
+        return sponsor_cache(key, lambda: roster_fetch(url, data=data, headers=headers)) or ""
+    needed = {member_key(st, url) for _, _, candidates, _, _ in wanted for url in candidates} - {None}
+    official = {}
+    for key, url, name in members(st, session, government, needed=needed):
+        if key and isinstance(name, str) and (normalized := member_name(name)):
+            official.setdefault(key, set()).add((url, normalized))
+    official = {key: rows for key, rows in official.items() if len({name for _, name in rows}) == 1}
+    # shortcut: withhold shared current names; resolve every claimant's authoritative aliases before relaxing this.
+    links = {}
+    for keys, names, candidates, name, surname in wanted:
+        if st == "HI" and len({key for url in candidates if (key := member_key(st, url)) and key.startswith('["HI","member",')}) > 1:
+            continue  # The search index cannot resolve conflicting numeric profile IDs.
+        verified = {}
+        for candidate in candidates:
+            for href, displayed in official.get(member_key(st, candidate), set()):
+                if displayed in names and (key := member_key(st, href or candidate)) and owners.get(displayed) == {keys[1]}:
+                    verified.setdefault(key, href or candidate)
+        if len(verified) == 1:
+            label = "Official legislative directory" if st in ("AL", "HI", "ID") else "Official legislator information"
+            # Shared directories must not hide conflicting sponsor identities.
+            profile = (next(iter(verified.values())), f"{label}: {name}", f"Current {STATES[st]} legislative roster", keys[1], tuple(sorted((names | {surname}) - {""})))
+            links.update({key: profile for key in keys})
+    return links
+
+
+def sponsor_metadata(st, bill):
+    if st not in STATES or bill.get("state") != st or type(bill.get("bill_id")) is not int or bill["bill_id"] <= 0:
+        return {}
+    sponsors = bill.get("sponsors")
+    if not isinstance(sponsors, list) or any(not isinstance(s, dict) or type(s.get("sponsor_type_id")) is not int
+            or type(s.get("sponsor_order")) is not int or s["sponsor_order"] < 1
+            or type(s.get("committee_sponsor")) not in (int, bool) or s["committee_sponsor"] not in (0, 1) for s in sponsors):
+        return {}
+    people = [s for s in sponsors if s["sponsor_type_id"] == 1 and not s["committee_sponsor"]]
+    if any(type(s.get("people_id")) is not int or s["people_id"] <= 0 or not isinstance(s.get("name"), str) or not s["name"].strip() for s in people):
+        return {}
+    first = [s for s in sponsors if s["sponsor_type_id"] == 1 and s["sponsor_order"] == 1]
+    if not people or (len(first) == 1 and first[0]["committee_sponsor"]):
+        return {"sponsor_legiscan_id": None, "sponsor_identity_source": None, "sponsor": None}
+    if len(first) != 1:
+        return {}
+    more = len(people) - 1
+    return {"sponsor_legiscan_id": first[0]["people_id"], "sponsor_identity_source": bill["bill_id"],
+            "sponsor": first[0]["name"] + (f" and {more} other{'s' if more > 1 else ''}" if more else "")}
+
+
+def sponsor_session(st, native, sessions, urls=()):
+    """Exact, unambiguous session aliases; special sessions never fall back to regular ones."""
+    native = native.lower()
+    if st == "ND":
+        from state_rosters import member_key
+        # ND's scraper uses the assembly number for regular AND special sessions.
+        scopes = set()
+        for url in urls:
+            if not member_key(st, url):
+                continue
+            u = urllib.parse.urlsplit(url)
+            if u.hostname in ("ndlegis.gov", "www.ndlegis.gov") and (m := re.match(r"/assembly/(\d+)-\d{4}/(regular|special-\d+)/", u.path)):
+                scopes.add((m[1], m[2]))
+        if len(scopes) != 1:
+            return None
+        term, scope = scopes.pop()
+        if not re.fullmatch(term + r"(?:st|nd|rd|th)?", native):
+            return None
+        native = f"{term}-{scope}"
+    # shortcut: three unrelated session IDs were source-checked; reverify these mappings when their next sessions open.
+    verified = {("AZ", "57th-2nd-regular"): 2235, ("NJ", "222"): 2250, ("NC", "2025e1"): 2274}
+    if (st, native) in verified:
+        return next((s for s in sessions if s.get("state_abbr") == st and s["session_id"] == verified[st, native]), None)
+    matches = []
+    for s in sessions:
+        if s.get("state_abbr") != st:
+            continue
+        year, end = s["year_start"], s["year_end"]
+        text = (s.get("session_title", "") + " " + s.get("session_name", "")).lower()
+        special = s.get("special") or "special" in text or "extra" in text
+        term = re.match(r"([0-9]+)(?:st|nd|rd|th)\b", s.get("session_name", ""))
+        aliases = set()
+        if not special:
+            aliases |= {str(year), f"{year}-{end}", f"{year}{end}", *(f"{year}{suffix}" for suffix in ("rs", "a", "gs", "r1", "f"))}
+            if term:
+                aliases |= {term[0].lower(), term[1]}
+                if st == "ND":
+                    aliases.add(term[1] + "-regular")
+        else:
+            number = re.search(r"([0-9]+)(?:st|nd|rd|th)\s+special", s.get("session_title", "").lower())
+            aliases.add(f"{year}_ss")
+            if number:
+                n = number[1]
+                aliases |= {f"{year}s{n}", f"{year}{n}e", f"{year}{n}s", f"{year}{end} special session {n}"}
+                if st == "TX" and term:
+                    aliases.add(term[1] + n)
+                if st == "ND" and term:
+                    aliases.add(term[1] + "-special-" + n)
+            if st == "NV" and term:
+                aliases.add(f"{year}special{term[1]}")
+        if native in aliases:
+            matches.append(s)
+    return matches[0] if len(matches) == 1 else None
+
+
+def scraped_sponsor(b):
+    empty = {"sponsor_legiscan_id": None, "sponsor_identity_source": None}
+    primary = [s for s in b["sponsorships"] if s["primary"]]
+    if b["state"] == "MA" or not primary or primary[0].get("entity_type") != "person":
+        return empty
+    if not os.environ.get("LEGISCAN_API_KEY"):
+        return {}
+    try:
+        st = b["state"]
+        session = sponsor_session(st, b["legislative_session"], sponsor_api("getSessionList", state=st).get("sessions", []),
+                                  (s["url"] for s in b.get("sources", [])))
+        if not session:
+            return {}
+        master = sponsor_api("getMasterList", id=session["session_id"]).get("masterlist", {})
+        matches = [r for r in master.values() if isinstance(r, dict) and type(r.get("bill_id")) is int and r["bill_id"] > 0 and bill_num(r.get("number", ""), st) == bill_num(b["identifier"], st)]
+        if len(matches) != 1:
+            return {}
+        bill = sponsor_api("getBill", id=matches[0]["bill_id"]).get("bill")
+        if not bill:
+            return {}
+        if bill.get("state") != st or bill.get("bill_id") != matches[0]["bill_id"] or bill.get("session", {}).get("session_id") != session["session_id"] or bill_num(bill.get("bill_number", ""), st) != bill_num(b["identifier"], st):
+            return empty
+        metadata = sponsor_metadata(st, bill)
+        metadata.pop("sponsor", None)  # Keep the native source's display text, including committees.
+        return metadata
+    except Exception as ex:
+        print(f"Sponsor identity unavailable for {state_id(b)}: {type(ex).__name__}", file=sys.stderr, flush=True)
+        return {}
+
+
+def enrich_sponsors(st):
+    """One state's saved native bills, one file at a time; never rewrite or enqueue."""
+    if st not in STATES or st == "MA":
+        raise ValueError("choose a state other than MA, which retains its Presenter lookup")
+    changed = 0
+    for path in scraped(st):
+        bill = {**load(path, {}), "state": st}
+        target = f"{DATA}/bills/{state_id(bill)}.json"
+        if not os.path.exists(target):
+            continue
+        metadata = scraped_sponsor(bill)
+        if not metadata:
+            continue
+        rec = load(target, {})
+        updated = {**rec, "sponsor_person_id": None, "sponsor_profile_id": None, **metadata}
+        if updated != rec:
+            write(target, json.dumps(updated, indent=1))
+            changed += 1
+    print(f"sponsors {st}: {changed} records enriched; no rewrites or posts; run site to rebuild")
+
+
 def state_update(b):
     st, (status, chamber, day) = b["state"], b["status"]
     people = [s for s in b["sponsorships"] if s["primary"]] or b["sponsorships"]
@@ -326,6 +656,7 @@ def state_update(b):
         "id": state_id(b), "where": STATES[st], "state": st, "actions": last_actions(b.get("actions", [])),
         "latest_action": action_context(b.get("actions", [])),
         "label": b["identifier"], "resolution": False, "amendment": "constitutional amendment" in b.get("classification", []), "title": b["title"], "official_url": (b["sources"] or [{"url": ""}])[0]["url"],
+        **scraped_sponsor(b),
         "sponsor": sponsor, "date": day, "stage": state_stage(st, status, chamber), "milestone": True, "source": source,
         "sponsor_profile_id": ma_sponsor(b),
         "sponsor_person_id": person_id if isinstance(person_id, str) and re.fullmatch(r"ocd-person/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", person_id) else None,
@@ -383,9 +714,10 @@ def set_health(st, **fields):
         return health[st]
 
 
-def bill_num(n):
-    """'HB 0012' -> 'HB12', so LegiScan and scraper bill numbers match."""
-    return re.sub(r"^([A-Z]+)0*(?=\d)", r"\1", re.sub(r"[^A-Z0-9]", "", n.upper()))
+def bill_num(n, st=None):
+    """Normalize number formatting, plus RI's verified HB/SB versus H/S identifiers."""
+    n = re.sub(r"^([A-Z]+)0*(?=\d)", r"\1", re.sub(r"[^A-Z0-9]", "", n.upper()))
+    return re.sub(r"^([HS])B(?=\d)", r"\1", n) if st == "RI" else n
 
 
 def save_ids(st, ai={}):
@@ -400,7 +732,7 @@ def save_ids(st, ai={}):
     sessions = [r[0] for r in rows]
     main = max(set(sessions), key=sessions.count, default=None)
     write(f"{DATA}/state/ids-{st.lower()}.json", json.dumps({"at": time.strftime("%Y-%m-%d", time.gmtime()), "year": int(max((r[3] for r in rows if r[0] == main), default=0)),
-          "bills": {bill_num(i): [s, i, n] for s, i, n, _ in rows if s == main}}))
+          "bills": {bill_num(i, st): [s, i, n] for s, i, n, _ in rows if s == main}}))
 
 
 def legiscan_items(st, known=None):
@@ -423,7 +755,7 @@ def legiscan_items(st, known=None):
             item = {**b, "state": st, "status": (s, chamber, b["status_date"]), "_date": b["status_date"]}
             if known is None:
                 yield f"{st}-ls{b['bill_id']}-{s}", item
-            elif (k := known["bills"].get(bill_num(b["number"]))) and s > k[2] and b["status_date"] >= known["at"]:
+            elif (k := known["bills"].get(bill_num(b["number"], st))) and s > k[2] and b["status_date"] >= known["at"]:
                 yield f"{st}-{k[0]}-{k[1]}-{s}", {**item, "_session": k[0], "number": k[1]}
 
 
@@ -432,15 +764,17 @@ def legiscan_id(b):
 
 
 def legiscan_update(b):
-    """No sponsor in LegiScan's bill list; leaving it out keeps the one a scraper found. getBill (one query) adds the
-    official history and the newest text, read from the legislature's own copy."""
+    """getBill adds sponsor IDs, official history and the newest text from the legislature's own copy."""
     st, (status, chamber, day), num = b["state"], b["status"], b["number"]
     desc = b.get("description") or ""
     actions, text = [f"{b['last_action_date']}: {b['last_action']}"] if b.get("last_action") else [], ""
     latest = {"date": b.get("last_action_date", ""), "text": b.get("last_action", ""), "chamber": ""}
+    metadata = {}
     if b.get("bill_id"):
         q = urllib.parse.urlencode({"key": os.environ["LEGISCAN_API_KEY"], "op": "getBill", "id": b["bill_id"]})
         bill = json.loads(fetch(f"https://api.legiscan.com/?{q}")).get("bill", {})
+        if bill.get("bill_id") == b["bill_id"] and bill_num(bill.get("bill_number", ""), st) == bill_num(num, st):
+            metadata = sponsor_metadata(st, bill)
         history = sorted(bill.get("history", []), key=lambda h: h["date"])
         actions = [f"{h['date']}: {h['action']}" for h in history[-6:]] or actions
         if history:
@@ -460,6 +794,7 @@ def legiscan_update(b):
                     print(f"LegiScan text {t.get('doc_id')}: {ex2!r}", file=sys.stderr, flush=True)
             text = ""
     return {
+        **metadata,
         "id": legiscan_id(b), "where": STATES[st], "actions": actions, "latest_action": latest,
         "state": st, "label": re.sub(r"^([A-Z]+)(\d+)$", r"\1 \2", num), "resolution": False, "title": b["title"], "official_url": b["url"],
         "date": day, "stage": state_stage(st, status, chamber), "milestone": True,
@@ -850,6 +1185,11 @@ def save(new):
     """Merge an update into the bill's record; only re-run the rewrite when the source or status changed."""
     path = f"{DATA}/bills/{new['id']}.json"
     rec = load(path, {"updates": []})
+    identity_keys = ("sponsor_legiscan_id", "sponsor_person_id", "sponsor_profile_id")
+    changed_identity = any(new.get(k) is not None and new[k] != rec.get(k) for k in identity_keys)
+    if changed_identity or ("sponsor_legiscan_id" in new and new["sponsor_legiscan_id"] is None):
+        for key in (*identity_keys, "sponsor_identity_source"):
+            new.setdefault(key, None)  # A corrected sponsor cannot inherit the previous person's other identifiers.
     # Changing feeds cannot change a bill's known legal instrument.
     for flag in ("resolution", "amendment"):
         new[flag] = new.get(flag, False) or rec.get(flag, False)
@@ -1062,7 +1402,7 @@ def house_members():
     """Verify current House membership from the Clerk, not names or historical predecessor IDs."""
     import xml.etree.ElementTree as ET
     try:
-        root = ET.fromstring(fetch("https://clerk.house.gov/xml/lists/MemberData.xml", timeout=10))
+        root = ET.fromstring(roster_fetch("https://clerk.house.gov/xml/lists/MemberData.xml"))
         congress = int(root.findtext("title-info/congress-num") or 0)
         today = datetime.datetime.now(datetime.timezone.utc).date()
         ids = set()
@@ -1097,14 +1437,14 @@ def ma_members(page):
 
 
 def sponsor_profiles(recs):
-    """Only current official rosters can turn persisted sponsor IDs into links."""
+    """Resolve persisted identities against current rosters, with failures isolated by state."""
     import xml.etree.ElementTree as ET
     links, members, committees = {}, {}, {}
     if any(not r.get("state") and r.get("sponsor_bioguide_id") for r in recs):
         house = house_members()
         links.update({f"US:{id}": (f"https://clerk.house.gov/members/{id}", "Official House profile and contact details", f'{ordinal(house["congress"])} Congress') for id in house.get("ids", [])})
         try:
-            root = ET.fromstring(fetch("https://www.senate.gov/general/contact_information/senators_cfm.xml", timeout=10))
+            root = ET.fromstring(roster_fetch("https://www.senate.gov/general/contact_information/senators_cfm.xml"))
             senators = {m.findtext("bioguide_id"): m.findtext("state") for m in root.findall("member")}
             links.update({f"US:{id}": (f"https://www.senate.gov/states/{st}/intro.htm", "Official Senate directory and contact details", f"Current Senate roster · {STATES[st]}")
                           for id, st in senators.items() if re.fullmatch(r"[A-Z][0-9]{6}", id or "") and st in STATES})
@@ -1113,20 +1453,28 @@ def sponsor_profiles(recs):
     if any(r.get("state") == "MA" for r in recs):
         for chamber in ("House", "Senate"):
             try:
-                page = fetch(f"https://malegislature.gov/Legislators/Members/{chamber}", timeout=10)
+                page = roster_fetch(f"https://malegislature.gov/Legislators/Members/{chamber}")
                 ids = re.findall(r'<a\b[^>]*href="/Legislators/Profile/([A-Za-z0-9_]+)"', page)
                 members[chamber] = ma_members(page)
                 links.update({f"MA:{id}": (f"https://malegislature.gov/Legislators/Profile/{id}", "Official Massachusetts profile and contact details", f"Current Massachusetts {chamber} roster") for id in ids})
             except Exception as ex:
                 print(f"MA {chamber} roster unavailable; omitting its links: {ex!r}", file=sys.stderr, flush=True)
         try:
-            page = fetch("https://malegislature.gov/Committees", timeout=10)
+            page = roster_fetch("https://malegislature.gov/Committees")
             for path, name in re.findall(r'<a\b[^>]*href="(/Committees/Detail/[A-Za-z0-9]+)"[^>]*>(.*?)</a>', page, re.S):
                 key = strip(name).casefold()
                 url = "https://malegislature.gov" + path
                 committees[key] = url if key not in committees or committees[key] == url else None
         except Exception as ex:
             print(f"MA committee directory unavailable: {ex!r}", file=sys.stderr, flush=True)
+    for st in sorted({r["state"] for r in recs if r.get("state") in STATES and r["state"] != "MA"
+                      and (r.get("sponsor_legiscan_id") or r.get("sponsor_person_id"))}):
+        try:
+            identities = {key for r in recs if r.get("state") == st
+                          for key in (f"{st}:ls:{r.get('sponsor_legiscan_id')}", f"{st}:{r.get('sponsor_person_id')}")}
+            links.update(state_profiles(st, identities))
+        except Exception as ex:
+            print(f"{st} sponsor roster unavailable: {type(ex).__name__}", file=sys.stderr, flush=True)
     return {"links": links, "members": members, "committees": committees,
             "checked": datetime.datetime.now(datetime.timezone.utc).date().isoformat()}
 
@@ -1152,15 +1500,29 @@ def bill_page(r, profiles={}):
         explain += "<p class=meta>So far we only have this bill's official title and description, so there isn't more to explain yet. The full bill is linked below.</p>"
     record = "".join(f"<li>{e(a)}</li>" for a in reversed(r.get("actions") or []))
     record = f"<ul class=meta>{record}</ul>" if record else ""
-    sponsor = ""
+    sponsor = profile = ""
     if r.get("sponsor"):
         profile = ""
         id = r.get("sponsor_profile_id") if r.get("state") else r.get("sponsor_bioguide_id")
-        match = profiles.get("links", {}).get(f"{r.get('state') or 'US'}:{id}") if isinstance(id, str) else None
+        links = profiles.get("links", {})
+        match = links.get(f"{r.get('state') or 'US'}:{id}") if isinstance(id, str) else None
+        if r.get("state") and r["state"] != "MA":
+            ocd = links.get(f"{r['state']}:{r.get('sponsor_person_id')}")
+            ls = links.get(f"{r['state']}:ls:{r.get('sponsor_legiscan_id')}")
+            match = ocd if r.get("sponsor_person_id") else ls
+            if ocd and ls and ocd != ls:
+                match = None
+            if match:
+                from state_rosters import member_name
+                displayed = member_name(re.sub(r" and \d+ others?$", "", r["sponsor"]))
+                # Display consistency only; surnames never establish an identity or pass the current-roster gate.
+                if len(match) < 5 or displayed not in match[4]:
+                    match = None
         if match:
-            url, label, term = match
+            url, label, term = match[:3]
+            checked = "evidence cached up to 24 hours" if r.get("state") not in (None, "MA") else f'roster checked {date(profiles["checked"])}'
             profile = (f'<br><a href="{e(url)}">{e(label)}</a>'
-                       f'<span class=meta>{e(term)} · roster checked {date(profiles["checked"])}</span>')
+                       f'<span class=meta>{e(term)} · {checked}</span>')
         sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}{profile}</dd>"
     history = ""
     if len(r["updates"]) > 1:
@@ -1169,6 +1531,8 @@ def bill_page(r, profiles={}):
     home = f"/states/{r['state'].lower()}/" if r.get("state") else "/us/"
     host = urllib.parse.urlparse(r["official_url"]).netloc.removeprefix("www.")
     credit = "<p class=meta>Bill status from <a href=\"https://legiscan.com\">LegiScan</a> (CC BY 4.0).</p>" if "legiscan.com" in host else ""
+    if profile and r.get("state") not in (None, "MA"):
+        credit += '<p class=meta>Sponsor identity cross-checks: <a href="https://legiscan.com">LegiScan</a> (CC BY 4.0) and <a href="https://openstates.org">Open States</a>.</p>'
     body = f"""<p class=eyebrow><a href="{home}">{e(r['where'])}</a> · {e(r['label'])}</p>
 <h1>{e(r['headline'])}</h1>
 {explain}
@@ -1611,4 +1975,4 @@ if __name__ == "__main__":
     cmd, arg = sys.argv[1], (sys.argv[2:] or [None])[0]
     if cmd == "congress":
         sys.exit(1 if process("congress", congress_items(), congress_update)[2] else 0)
-    {"site": build_site, "restage": restage, "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh, "catchup": catchup, "report": report}[cmd]()
+    {"site": build_site, "restage": restage, "sponsors": lambda: enrich_sponsors(arg), "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh, "catchup": catchup, "report": report}[cmd]()
