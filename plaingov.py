@@ -520,8 +520,8 @@ def state_profiles(st, identities):
         verified = {}
         for candidate in candidates:
             for href, displayed in official.get(member_key(st, candidate), set()):
-                if displayed in names and (key := member_key(st, href or candidate)) and owners.get(displayed) == {keys[1]}:
-                    verified.setdefault(key, href or candidate)
+                if href and displayed in names and (key := member_key(st, href)) and owners.get(displayed) == {keys[1]}:
+                    verified.setdefault(key, href)
         if len(verified) == 1:
             label = "Official legislative directory" if st in ("AL", "HI", "ID") else "Official legislator information"
             # Shared directories must not hide conflicting sponsor identities.
@@ -641,19 +641,22 @@ def enrich_sponsors(st):
     if st not in STATES or st == "MA":
         raise ValueError("choose a state other than MA, which retains its Presenter lookup")
     changed = 0
-    for path in scraped(st):
-        bill = {**load(path, {}), "state": st}
-        target = f"{DATA}/bills/{state_id(bill)}.json"
-        if not os.path.exists(target):
-            continue
-        metadata = scraped_sponsor(bill)
-        if not metadata:
-            continue
-        rec = load(target, {})
-        updated = {**rec, "sponsor_person_id": None, "sponsor_profile_id": None, **metadata}
-        if updated != rec:
-            write(target, json.dumps(updated, indent=1))
-            changed += 1
+    for enriched in (False, True):  # Missing identities get the daily budget before completed records are refreshed.
+        for path in scraped(st):
+            bill = {**load(path, {}), "state": st}
+            target = f"{DATA}/bills/{state_id(bill)}.json"
+            if not os.path.exists(target):
+                continue
+            rec = load(target, {})
+            if ("sponsor_legiscan_id" in rec) != enriched:
+                continue
+            metadata = scraped_sponsor(bill)
+            if not metadata:
+                continue
+            updated = {**rec, "sponsor_person_id": None, "sponsor_profile_id": None, **metadata}
+            if updated != rec:
+                write(target, json.dumps(updated, indent=1))
+                changed += 1
     print(f"sponsors {st}: {changed} records enriched; no rewrites or posts; run site to rebuild")
 
 

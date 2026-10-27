@@ -108,6 +108,26 @@ class SponsorTests(unittest.TestCase):
         person["links"] = search
         self.assertTrue(self.profiles("HI", people=[person], legislators=[legislator], official=rows))
 
+    def test_membership_without_destination_does_not_link_candidate(self):
+        self.assertEqual(self.profiles(official=[(rosters.member_key("AL", URL), None, "Jane Doe")]), {})
+
+    def test_enrichment_prioritizes_unfinished_records_with_a_renewed_budget(self):
+        for number in (1, 2):
+            bill = {"legislative_session": "2026", "identifier": f"HB {number}", "sponsorships": []}
+            p.write(f"{p.DATA}/scrape/al/al/bill_{number}.json", json.dumps(bill))
+            record = {"id": f"states/al/2026-hb-{number}"}
+            if number == 1:
+                record.update(sponsor_legiscan_id=7, sponsor_identity_source=99)
+            p.write(f"{p.DATA}/bills/{record['id']}.json", json.dumps(record))
+        calls = []
+        def lookup(bill):
+            calls.append(bill["identifier"])
+            return {"sponsor_legiscan_id": 8, "sponsor_identity_source": 100} if len(calls) == 1 else {}
+        with patch.object(p, "scraped_sponsor", side_effect=lookup):
+            p.enrich_sponsors("AL")
+        self.assertEqual(calls[0], "HB 2", "the first renewed lookup must not repeat a completed bill")
+        self.assertEqual(p.load(f"{p.DATA}/bills/states/al/2026-hb-2.json", {})["sponsor_legiscan_id"], 8)
+
     def test_metadata_uses_an_explicit_primary_person(self):
         person = {**LEGISLATOR, "sponsor_type_id": 1, "sponsor_order": 1}
         bill = {"bill_id": 99, "state": "AL", "sponsors": [person]}
