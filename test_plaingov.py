@@ -120,7 +120,7 @@ try:
     house = plaingov.sponsor_profiles([current])
     p = bill_page(current, house)
     assert '<a href="https://clerk.house.gov/members/K000389" title="Official House profile and contact details">Rep. Ro Khanna (D-CA)</a>' in p
-    assert "Rep. Ro Khanna (D-CA)" in p and "The sponsor may not represent you" in p
+    assert "Rep. Ro Khanna (D-CA)" in p and "The sponsor may not represent you" not in p
     for absent in (None, "L000551", "F000001", "U000001", {}):
         p = bill_page({**current, "sponsor_bioguide_id": absent}, house)
         assert "clerk.house.gov/members/" not in p and "Rep. Ro Khanna (D-CA)" in p
@@ -137,50 +137,16 @@ try:
 finally:
     plaingov.api, plaingov.fetch = original_api, original_fetch
 
-# Contact links stay official and do not collect addresses or send messages.
-p = bill_page(rec)
-assert "house.gov/representatives/find-your-representative" in p and "senate.gov/senators/senators-contact.htm" in p
-assert "The sponsor may not represent you" in p and "S. 4618" in p
-p = plaingov.participation({**rec, "state": "NY", "title": "<script>bad</script>"})
-assert "nyassembly.gov/mem/search/" in p and "nysenate.gov/find-my-senator" in p
-assert "<script>" not in p and "Bill details to include" not in p
-p = plaingov.participation({**rec, "state": "AK"})
-assert "usa.gov/elected-officials" in p and "house.gov/" not in p
-assert "<form" not in p and "<input" not in p and "mailto:" not in p
-assert "https://malegislature.gov/Search/FindMyLegislator" in plaingov.participation({**rec, "state": "MA"})
+# Pages keep sponsor contacts, not generic committee directories or representative finders.
+for state in (None, "MA", "NY", "AK"):
+    p = bill_page({**rec, "state": state, "actions": ["2026-10-26: " + referral]})
+    body = p.split('<main id="main" class="wrap">')[1].split("</main>")[0]
+    assert all(text not in body for text in ("Find your", "may not represent you", "/committees", "/Committees", "FindMyLegislator", "elected-officials"))
+    assert rec["sponsor"] in body and rec["official_url"] in body
+    assert "<form" not in body and "<input" not in body
 
-# Next steps use the latest action, never the sponsor or bill prefix.
 ma = {**rec, "state": "MA", "where": "Massachusetts", "stage": state_stage("MA", 2, "lower"),
       "latest_action": {"date": "2026-10-22", "text": "Read; and placed in the Orders of the Day for the next session", "chamber": "upper"}}
-assert plaingov.next_decision(ma) == ("With the Senate. No vote date confirmed.", "Senate", False)
-assert "Legislators/Members/Senate" in bill_page(ma)
-assert "Massachusetts Senate" in bill_page(ma) and "Oct 22, 2026" in bill_page(ma)
-committee = {**ma, "latest_action": {"date": "2026-10-22", "text": "Referred to the committee on Ways and Means", "chamber": "upper"}}
-assert plaingov.next_decision(committee)[2] == "committee on Ways and Means"
-assert 'href="https://malegislature.gov/Committees"' in bill_page(committee)
-assert "Legislators/Members/Senate" not in bill_page(committee), "do not substitute the full chamber for a committee"
-assert 'href="https://malegislature.gov/Committees/Detail/J39"' in bill_page(committee, {"committees": {"ways and means": "https://malegislature.gov/Committees/Detail/J39"}})
-assert 'href="https://malegislature.gov/Committees"' in bill_page(committee, {"committees": {"ways and means": None}})
-for record in ({**ma, "latest_action": {}, "actions": []}, {**rec, "actions": ["2026-10-22: " + referral]}):
-    assert plaingov.next_decision(record)[1] == "", "no guessed chamber"
-received_rec = {**rec, "actions": ["2026-10-22: Received in Senate and referred to the Committee on Finance."]}
-assert plaingov.next_decision(received_rec)[1:] == ("Senate", "Committee on Finance")
-assert 'href="https://www.senate.gov/committees/"' in bill_page(received_rec)
-assert "clerk.house.gov/committees" not in bill_page(received_rec)
-unknown_chamber = bill_page({**rec, "actions": ["2026-10-22: " + referral]})
-assert 'href="https://www.congress.gov/committees"' in unknown_chamber
-assert "clerk.house.gov/committees" not in unknown_chamber and "senate.gov/committees/" not in unknown_chamber
-assert "With Committee on Energy and Commerce" not in unknown_chamber
-other_committee = {**committee, "state": "AK"}
-body = bill_page(other_committee).split('<main id="main" class="wrap">')[1].split('</main>')[0]
-assert body.count(other_committee["official_url"]) == 1, "no duplicate official-record fallback"
-for record in ({**ma, "stage": state_stage("MA", 4)}, {**ma, "stage": state_stage("MA", 5)},
-               {**ma, "resolution": True}, {**ma, "amendment": True}):
-    assert plaingov.next_decision(record) == ("", "", False)
-    assert "Legislators/Members/Senate" not in bill_page(record)
-assert plaingov.next_decision({**ma, "latest_action": {"text": "Presented to the Governor"}})[1] == "Governor"
-assert plaingov.next_decision({**ma, "latest_action": {"text": "Passed to be engrossed"}})[1] == "Senate"
-assert not plaingov.next_decision({**ma, "latest_action": {"text": "Failed to pass"}})[1]
 
 # Public contacts stay bound to a single official profile in the same current-roster row.
 row = '''<tr><td><a href="/Legislators/Profile/MJB0"><img src="x"></a></td>
