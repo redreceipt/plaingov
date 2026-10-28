@@ -1261,23 +1261,14 @@ h2{font-size:1.15rem;margin:2.25rem 0 .5rem}
 .eyebrow{color:var(--soft);font-size:.9rem;margin:1.75rem 0 0}.eyebrow a{color:var(--soft)}
 .eyebrow+h1{margin-top:.25rem}
 .lede{font-size:1.2rem;color:#1f2937}
-.box{background:#fff;border:1px solid var(--line);border-radius:12px;padding:1rem 1.25rem}
-.box p{margin:.5rem 0}
-summary{cursor:pointer;font-weight:600}
-details{margin:1rem 0}h3{font-size:1rem;margin:1.25rem 0 .5rem}
-#participate{border-top:1px solid var(--line);margin-top:1rem}
-dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:0}
-dt{color:var(--soft)}dd{margin:0}
 .list{list-style:none;padding:0;margin:0}
 .list li{border-bottom:1px solid var(--line);padding:.8rem 0}
 .list a{font-weight:600;text-decoration:none;color:var(--ink)}.list a:hover{text-decoration:underline}
-.contacts a{color:var(--accent);text-decoration:underline}
 .meta{display:block;color:var(--soft);font-size:.85rem}
 .more{display:inline-block;margin-top:.75rem;font-weight:600}
 .grid{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.5rem}
 .grid a{display:block;background:#fff;border:1px solid var(--line);border-radius:10px;padding:.6rem .8rem;text-decoration:none;color:var(--ink);font-weight:600}
 .grid a:hover{border-color:var(--accent)}
-.official{display:inline-block;margin-top:2rem;font-weight:600}
 table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line)}th{color:var(--soft);font-weight:600}
 .site-foot{margin-top:3.5rem;padding-top:1.5rem;padding-bottom:2.5rem;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
 .foot{display:flex;flex-wrap:wrap;gap:1.25rem 2rem;justify-content:space-between}
@@ -1390,44 +1381,30 @@ def participation(r, profiles={}):
                  ("Find your New York state senator", "https://www.nysenate.gov/find-my-senator")]
     else:
         links = [("Find your state representatives through USA.gov", "https://www.usa.gov/elected-officials")]
-    details = f"{r['where']} · {r['label']}\n{r['title']}\n{r['official_url']}"
     _, chamber, committee = next_decision(r)
     direct = ""
     if committee and not r.get("state"):
         directories = [("House", "https://clerk.house.gov/committees"), ("Senate", "https://www.senate.gov/committees/")]
+        if not chamber:
+            directories = [("Congressional", "https://www.congress.gov/committees")]
         direct = "".join(f'<p><a href="{url}">{ch} committees and contact details →</a></p>' for ch, url in directories if not chamber or ch == chamber)
     elif committee:
         name = re.sub(r"^(?:the )?committee on ", "", committee, flags=re.I).casefold()
         match = profiles.get("committees", {}).get(name) if r.get("state") == "MA" else None
-        url = match or ("https://malegislature.gov/Committees" if r.get("state") == "MA" else r["official_url"])
-        label = "Committee members and contact details" if match else "Find the committee" if r.get("state") == "MA" else "See the committee referral in the official record"
-        direct = f'<p><a href="{e(url)}">{label} →</a></p>'
+        if r.get("state") == "MA":
+            url = match or "https://malegislature.gov/Committees"
+            label = "Committee members and contact details" if match else "Find the committee"
+            direct = f'<p><a href="{e(url)}">{label} →</a></p>'
     elif chamber in ("House", "Senate") and (r.get("state") == "MA" or not r.get("state")):
         url = (f"https://malegislature.gov/Legislators/Members/{chamber}" if r.get("state") == "MA" else
                "https://www.senate.gov/senators/" if chamber == "Senate" else "https://www.house.gov/representatives")
         direct = f'<p><a href="{url}">{e(r["where"])} {chamber}: members and contact details →</a></p>'
-        members = profiles.get("members", {}).get(chamber, []) if r.get("state") == "MA" else []
-        if members:
-            rows = []
-            for member in members:
-                contact = (f' · <a href="tel:+1{member["phone"]}" aria-label="Call {e(member["name"])}">Call</a>' if member["phone"] else "")
-                contact += (f' · <a href="mailto:{e(member["email"])}" aria-label="Email {e(member["name"])}">Email</a>' if member["email"] else "")
-                rows.append(f'<li><a href="https://malegislature.gov/Legislators/Profile/{member["id"]}">{e(member["name"])}</a>{contact}</li>')
-            direct += (f'<details><summary>See {len(members)} {chamber} members here</summary>'
-                       '<p class=meta>These are current chamber members, not a list of lawmakers opposing or delaying this bill.</p>'
-                       '<ul class="list contacts">' + "".join(rows) + '</ul>'
-                       f'<p class=meta>Official roster checked {date(profiles["checked"])}</p></details>')
     elif chamber == "President":
         direct = '<p><a href="https://www.whitehouse.gov/contact/">Contact the President’s office →</a></p>'
     elif chamber == "Governor" and r.get("state") == "MA":
         direct = '<p><a href="https://www.mass.gov/info-details/email-the-governors-office">Contact the Governor’s office →</a></p>'
-    return ('<section id="participate"><h3>Want to get involved?</h3>' + direct +
-            '<p class=meta>The sponsor may not represent you. Find your own representatives:</p>'
-            '<ul>' + "".join(f'<li><a href="{url}">{label}</a></li>' for label, url in links) + '</ul>'
-            '<details><summary>Bill details to include in your message</summary>'
-            '<p>Copy these details, then add your question or views in your own words.</p>'
-            f'<p style="white-space:pre-wrap;overflow-wrap:anywhere">{e(details)}</p></details>'
-            '<p class=meta>These links open government websites. PlainGov does not collect your address or send messages for you.</p></section>')
+    return (direct + '<p>The sponsor may not represent you. '
+            + " · ".join(f'<a href="{url}">{label}</a>' for label, url in links) + '.</p>')
 
 
 def house_members():
@@ -1519,19 +1496,16 @@ def bill_page(r, profiles={}):
         track = "<p>This is a resolution, not an enacted law.</p>"
     else:
         track = ""
-    message, _, _ = next_decision(r)
-    nxt = f"<p><strong>Next:</strong> {e(message)}</p>" if message else ""
-    if message:
-        latest = (r.get("latest_action") or {}).get("date") or (r.get("actions") or [r["date"]])[-1][:10]
-        nxt += f'<p class=meta>Based on the record dated {date(latest)}. <a href="{e(r["official_url"])}">Check for updates →</a></p>'
-    paragraphs = [r["summary"], *(r.get("details") or []), r.get("changes", "")]
-    explain = "".join(f'<p{" class=lede" if i == 0 else ""}>{e(p)}</p>' for i, p in enumerate(dict.fromkeys(p for p in paragraphs if p)))
+    latest = (r.get("latest_action") or {}).get("date") or (r.get("actions") or [r["date"]])[-1][:10]
+    happened = r.get("happened") or f"{st['now']} As of {date(latest)}."
+    paragraphs = [r["summary"]]
+    if not r.get("limited"):
+        paragraphs += [*(r.get("details") or []), r.get("changes", "")]
+    explain = "".join(f'<p>{e(p)}</p>' for p in dict.fromkeys(p for p in paragraphs if p))
     if r.get("effective"):
         explain += f"<p><strong>Takes effect:</strong> {e(r['effective'])}</p>"
     if r.get("limited"):
-        explain += "<p class=meta>So far we only have this bill's official title and description, so there isn't more to explain yet. The full bill is linked below.</p>"
-    record = "".join(f"<li>{e(a)}</li>" for a in reversed(r.get("actions") or []))
-    record = f"<ul class=meta>{record}</ul>" if record else ""
+        explain += "<p>We only have the official title and description, so the details and effects on people aren’t confirmed yet.</p>"
     sponsor = profile = ""
     if r.get("sponsor"):
         profile = ""
@@ -1551,15 +1525,17 @@ def bill_page(r, profiles={}):
                 if len(match) < 5 or displayed not in match[4]:
                     match = None
         if match:
-            url, label, term = match[:3]
-            checked = "evidence cached up to 24 hours" if r.get("state") not in (None, "MA") else f'roster checked {date(profiles["checked"])}'
-            profile = (f'<br><a href="{e(url)}">{e(label)}</a>'
-                       f'<span class=meta>{e(term)} · {checked}</span>')
-        sponsor = f"<dt>Who proposed it</dt><dd>{e(r['sponsor'])}{profile}</dd>"
-    history = ""
-    if len(r["updates"]) > 1:
-        history = "<p>Earlier milestones</p><ul class=list>" + "".join(
-            f"<li>{e(u['now'])}<span class=meta>{date(u['date'])}</span></li>" for u in reversed(r["updates"])) + "</ul>"
+            url, label = match[:2]
+            profile = f'<a href="{e(url)}" title="{e(label)}">{e(r["sponsor"])}</a>'
+        sponsor = f'<p>Proposed by {profile or e(r["sponsor"])}.'
+        if match and r.get("state") == "MA":
+            member = next((m for members in profiles.get("members", {}).values() for m in members if m["id"] == id), None)
+            if member:
+                if member["phone"]:
+                    sponsor += f' <a href="tel:+1{member["phone"]}">Call {e(member["name"])}</a>.'
+                if member["email"]:
+                    sponsor += f' <a href="mailto:{e(member["email"])}">Email {e(member["name"])}</a>.'
+        sponsor += '</p>'
     home = f"/states/{r['state'].lower()}/" if r.get("state") else "/us/"
     host = urllib.parse.urlparse(r["official_url"]).netloc.removeprefix("www.")
     credit = "<p class=meta>Bill status from <a href=\"https://legiscan.com\">LegiScan</a> (CC BY 4.0).</p>" if "legiscan.com" in host else ""
@@ -1568,13 +1544,9 @@ def bill_page(r, profiles={}):
     body = f"""<p class=eyebrow><a href="{home}">{e(r['where'])}</a> · {e(r['label'])}</p>
 <h1>{e(r['headline'])}</h1>
 {explain}
-<h2>Where it stands</h2>
-<div class=box>{track}<p>{e(r['happened']) if r.get('happened') else f"{e(st['now'])} <span class=meta>{date(r['date'])}</span>"}</p>{nxt}
-<details><summary>Official history</summary>{record}{history}<p><a href="{e(r['official_url'])}">Full official record →</a></p></details>
-{participation(r, profiles)}</div>
-<h2>The basics</h2>
-<dl><dt>Bill number</dt><dd>{e(r['label'])}</dd><dt>Official name</dt><dd>{e(r['title'])}</dd>{sponsor}</dl>
-<a class=official href="{e(r['official_url'])}">Read the full bill on {e(host)} →</a>{credit}"""
+{track}<p>{e(happened)}</p>
+{sponsor}{participation(r, profiles)}
+<p><a href="{e(r['official_url'])}">Read the official bill and history on {e(host)}</a></p>{credit}"""
     return page(f"{r['headline']} · PlainGov", r["summary"], body, r["id"] + "/")
 
 
