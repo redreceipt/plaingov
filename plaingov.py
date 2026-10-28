@@ -1340,73 +1340,6 @@ def by_stage(recs, where):
     return out or "<p>Nothing new here yet. We check every day, so come back soon.</p>"
 
 
-def next_decision(r):
-    """Explain only supported next steps; a chamber's members are not a list of blockers."""
-    st = r["stage"]
-    if r.get("resolution") or r.get("amendment") or st["step"] == 3 or "Veto" in st["short"]:
-        return "", "", False
-    a = r.get("latest_action") or {}
-    text = a.get("text") or (r.get("actions") or [""])[-1].partition(": ")[2]
-    chamber = {"upper": "Senate", "lower": "Assembly" if r.get("state") in ASSEMBLY else "House",
-               "legislature": "Legislature"}.get(a.get("chamber"), "")
-    received = re.search(r"\b(?:Received in|Read twice.*in|Introduced in) (House|Senate)\b", text, re.I)
-    if received:
-        chamber = received[1].title()
-    referral = re.search(r"\breferred to (?:the )?(.+?)(?:\.\s|\.$|;|$)", text, re.I)
-    if referral and re.search(r"\bcommittee\b", referral[1], re.I):
-        name = referral[1].rstrip(".")
-        return f"With {name}. No hearing or vote date confirmed.", chamber, name
-    if re.search(r"\b(?:presented|sent|transmitted|delivered) to (?:the )?(Governor|President)\b", text, re.I):
-        office = "Governor" if r.get("state") else "President"
-        return f"Awaiting the {office}'s decision.", office, False
-    if chamber and re.search(r"Orders of the Day|placed on.*calendar|Received in|Introduced in", text, re.I):
-        return f"With the {chamber}. No vote date confirmed.", chamber, False
-    if st["step"] == 1 and re.match(r"Passed(?:/agreed to)?\b", text, re.I):
-        passed = st["short"].removeprefix("Passed the ")
-        if passed in ("House", "Assembly", "Senate"):
-            other = ("Assembly" if r.get("state") in ASSEMBLY else "House") if passed == "Senate" else "Senate"
-            return f"The {other} must also approve it. Its next action is not verified.", other, False
-    return "The next decision-maker or action is not verified.", "", False
-
-
-def participation(r, profiles={}):
-    """User-initiated contact, with an official finder when the reader's district is unknown."""
-    if not r.get("state"):
-        links = [("Find your U.S. representative", "https://www.house.gov/representatives/find-your-representative"),
-                 ("Find your U.S. senators", "https://www.senate.gov/senators/senators-contact.htm")]
-    elif r["state"] == "MA":
-        links = [("Find your Massachusetts legislators", "https://malegislature.gov/Search/FindMyLegislator")]
-    elif r["state"] == "NY":
-        links = [("Find your New York assemblymember", "https://nyassembly.gov/mem/search/"),
-                 ("Find your New York state senator", "https://www.nysenate.gov/find-my-senator")]
-    else:
-        links = [("Find your state representatives through USA.gov", "https://www.usa.gov/elected-officials")]
-    _, chamber, committee = next_decision(r)
-    direct = ""
-    if committee and not r.get("state"):
-        directories = [("House", "https://clerk.house.gov/committees"), ("Senate", "https://www.senate.gov/committees/")]
-        if not chamber:
-            directories = [("Congressional", "https://www.congress.gov/committees")]
-        direct = "".join(f'<p><a href="{url}">{ch} committees and contact details →</a></p>' for ch, url in directories if not chamber or ch == chamber)
-    elif committee:
-        name = re.sub(r"^(?:the )?committee on ", "", committee, flags=re.I).casefold()
-        match = profiles.get("committees", {}).get(name) if r.get("state") == "MA" else None
-        if r.get("state") == "MA":
-            url = match or "https://malegislature.gov/Committees"
-            label = "Committee members and contact details" if match else "Find the committee"
-            direct = f'<p><a href="{e(url)}">{label} →</a></p>'
-    elif chamber in ("House", "Senate") and (r.get("state") == "MA" or not r.get("state")):
-        url = (f"https://malegislature.gov/Legislators/Members/{chamber}" if r.get("state") == "MA" else
-               "https://www.senate.gov/senators/" if chamber == "Senate" else "https://www.house.gov/representatives")
-        direct = f'<p><a href="{url}">{e(r["where"])} {chamber}: members and contact details →</a></p>'
-    elif chamber == "President":
-        direct = '<p><a href="https://www.whitehouse.gov/contact/">Contact the President’s office →</a></p>'
-    elif chamber == "Governor" and r.get("state") == "MA":
-        direct = '<p><a href="https://www.mass.gov/info-details/email-the-governors-office">Contact the Governor’s office →</a></p>'
-    return (direct + '<p>The sponsor may not represent you. '
-            + " · ".join(f'<a href="{url}">{label}</a>' for label, url in links) + '.</p>')
-
-
 def house_members():
     """Verify current House membership from the Clerk, not names or historical predecessor IDs."""
     import xml.etree.ElementTree as ET
@@ -1448,7 +1381,7 @@ def ma_members(page):
 def sponsor_profiles(recs):
     """Resolve persisted identities against current rosters, with failures isolated by state."""
     import xml.etree.ElementTree as ET
-    links, members, committees = {}, {}, {}
+    links, members = {}, {}
     if any(not r.get("state") and r.get("sponsor_bioguide_id") for r in recs):
         house = house_members()
         links.update({f"US:{id}": (f"https://clerk.house.gov/members/{id}", "Official House profile and contact details", f'{ordinal(house["congress"])} Congress') for id in house.get("ids", [])})
@@ -1468,14 +1401,6 @@ def sponsor_profiles(recs):
                 links.update({f"MA:{id}": (f"https://malegislature.gov/Legislators/Profile/{id}", "Official Massachusetts profile and contact details", f"Current Massachusetts {chamber} roster") for id in ids})
             except Exception as ex:
                 print(f"MA {chamber} roster unavailable; omitting its links: {ex!r}", file=sys.stderr, flush=True)
-        try:
-            page = roster_fetch("https://malegislature.gov/Committees")
-            for path, name in re.findall(r'<a\b[^>]*href="(/Committees/Detail/[A-Za-z0-9]+)"[^>]*>(.*?)</a>', page, re.S):
-                key = strip(name).casefold()
-                url = "https://malegislature.gov" + path
-                committees[key] = url if key not in committees or committees[key] == url else None
-        except Exception as ex:
-            print(f"MA committee directory unavailable: {ex!r}", file=sys.stderr, flush=True)
     for st in sorted({r["state"] for r in recs if r.get("state") in STATES and r["state"] != "MA"
                       and (r.get("sponsor_legiscan_id") or r.get("sponsor_person_id"))}):
         try:
@@ -1484,7 +1409,7 @@ def sponsor_profiles(recs):
             links.update(state_profiles(st, identities))
         except Exception as ex:
             print(f"{st} sponsor roster unavailable: {type(ex).__name__}", file=sys.stderr, flush=True)
-    return {"links": links, "members": members, "committees": committees,
+    return {"links": links, "members": members,
             "checked": datetime.datetime.now(datetime.timezone.utc).date().isoformat()}
 
 
@@ -1545,7 +1470,7 @@ def bill_page(r, profiles={}):
 <h1>{e(r['headline'])}</h1>
 {explain}
 {track}<p>{e(happened)}</p>
-{sponsor}{participation(r, profiles)}
+{sponsor}
 <p><a href="{e(r['official_url'])}">Read the official bill and history on {e(host)}</a></p>{credit}"""
     return page(f"{r['headline']} · PlainGov", r["summary"], body, r["id"] + "/")
 
