@@ -23,8 +23,12 @@ assert "Would this affect you?" not in tweet_text({**rec, "tweet": "Gives states
 # Pages escape model output and link back to their list page.
 p = bill_page(rec)
 assert "Funds counselors &lt;b&gt;in&lt;/b&gt; schools" in p and "<b>in</b>" not in p
-assert "<h2>Where it stands</h2>" in p and 'href="/us/"' in p
-assert "<ol class=tracker>" not in p and "<summary>Official history</summary>" in p
+assert 'href="/us/"' in p
+body = p.split('<main id="main" class="wrap">')[1].split('</main>')[0]
+assert all(tag not in body for tag in ('<section', '<h2', '<h3', '<details', '<dl', 'class=box', 'class=lede', '<ul'))
+assert body.count(rec["label"]) == 1 and body.count(rec["official_url"]) == 1
+assert "Where it stands" not in body and "The basics" not in body
+assert "next decision-maker or action is not verified" not in body
 
 assert us_stage("Passed House")["short"] == "Passed the House"
 assert us_stage("Senate agreed to House amendment")["step"] == 2
@@ -115,7 +119,7 @@ try:
     assert requests[0][1]["timeout"] == 20 and requests[0][1]["context"].check_hostname
     house = plaingov.sponsor_profiles([current])
     p = bill_page(current, house)
-    assert 'href="https://clerk.house.gov/members/K000389"' in p and "119th Congress · roster checked" in p
+    assert '<a href="https://clerk.house.gov/members/K000389" title="Official House profile and contact details">Rep. Ro Khanna (D-CA)</a>' in p
     assert "Rep. Ro Khanna (D-CA)" in p and "The sponsor may not represent you" in p
     for absent in (None, "L000551", "F000001", "U000001", {}):
         p = bill_page({**current, "sponsor_bioguide_id": absent}, house)
@@ -135,11 +139,11 @@ finally:
 
 # Contact links stay official and do not collect addresses or send messages.
 p = bill_page(rec)
-assert 'id="participate"' in p and "house.gov/representatives/find-your-representative" in p and "senate.gov/senators/senators-contact.htm" in p
-assert "The sponsor may not represent you" in p and "School Counseling Act" in p
+assert "house.gov/representatives/find-your-representative" in p and "senate.gov/senators/senators-contact.htm" in p
+assert "The sponsor may not represent you" in p and "S. 4618" in p
 p = plaingov.participation({**rec, "state": "NY", "title": "<script>bad</script>"})
 assert "nyassembly.gov/mem/search/" in p and "nysenate.gov/find-my-senator" in p
-assert "&lt;script&gt;bad&lt;/script&gt;" in p and "<script>" not in p
+assert "<script>" not in p and "Bill details to include" not in p
 p = plaingov.participation({**rec, "state": "AK"})
 assert "usa.gov/elected-officials" in p and "house.gov/" not in p
 assert "<form" not in p and "<input" not in p and "mailto:" not in p
@@ -152,7 +156,7 @@ assert plaingov.next_decision(ma) == ("With the Senate. No vote date confirmed."
 assert "Legislators/Members/Senate" in bill_page(ma)
 assert "Massachusetts Senate" in bill_page(ma) and "Oct 22, 2026" in bill_page(ma)
 committee = {**ma, "latest_action": {"date": "2026-10-22", "text": "Referred to the committee on Ways and Means", "chamber": "upper"}}
-assert plaingov.next_decision(committee)[2] and "Ways and Means" in bill_page(committee)
+assert plaingov.next_decision(committee)[2] == "committee on Ways and Means"
 assert 'href="https://malegislature.gov/Committees"' in bill_page(committee)
 assert "Legislators/Members/Senate" not in bill_page(committee), "do not substitute the full chamber for a committee"
 assert 'href="https://malegislature.gov/Committees/Detail/J39"' in bill_page(committee, {"committees": {"ways and means": "https://malegislature.gov/Committees/Detail/J39"}})
@@ -164,7 +168,12 @@ assert plaingov.next_decision(received_rec)[1:] == ("Senate", "Committee on Fina
 assert 'href="https://www.senate.gov/committees/"' in bill_page(received_rec)
 assert "clerk.house.gov/committees" not in bill_page(received_rec)
 unknown_chamber = bill_page({**rec, "actions": ["2026-10-22: " + referral]})
-assert "clerk.house.gov/committees" in unknown_chamber and "senate.gov/committees/" in unknown_chamber
+assert 'href="https://www.congress.gov/committees"' in unknown_chamber
+assert "clerk.house.gov/committees" not in unknown_chamber and "senate.gov/committees/" not in unknown_chamber
+assert "With Committee on Energy and Commerce" not in unknown_chamber
+other_committee = {**committee, "state": "AK"}
+body = bill_page(other_committee).split('<main id="main" class="wrap">')[1].split('</main>')[0]
+assert body.count(other_committee["official_url"]) == 1, "no duplicate official-record fallback"
 for record in ({**ma, "stage": state_stage("MA", 4)}, {**ma, "stage": state_stage("MA", 5)},
                {**ma, "resolution": True}, {**ma, "amendment": True}):
     assert plaingov.next_decision(record) == ("", "", False)
@@ -182,11 +191,16 @@ assert members == [{"id": "MJB0", "name": "Michael Barrett", "phone": "617722157
 assert not plaingov.ma_members(row.replace('>Barrett</a>', '>Barrett</a><a href="/Legislators/Profile/OTHER">Other</a>'))
 assert not plaingov.ma_members(row.replace("MJB0", "../bad"))
 assert plaingov.ma_members(row.replace("masenate.gov", "example.org"))[0]["email"] == ""
-p = bill_page(ma, {"members": {"Senate": members}, "checked": "2026-10-26"})
+contacts = {"members": {"Senate": members}, "links": {"MA:MJB0": (
+    "https://malegislature.gov/Legislators/Profile/MJB0", "Official Massachusetts profile and contact details", "Current Massachusetts Senate roster")}}
+p = bill_page({**ma, "sponsor": "Sen. Michael Barrett", "sponsor_profile_id": "MJB0"}, contacts)
 assert 'href="tel:+16177221572"' in p and 'href="mailto:Mike.Barrett@masenate.gov"' in p
-assert "See 1 Senate members here" in p and "not a list of lawmakers opposing" in p
+assert "See 1 Senate members here" not in p and "<details>" not in p
+for record in (ma, {**ma, "sponsor_profile_id": "FORMER"}):
+    p = bill_page(record, contacts)
+    assert "tel:" not in p and "mailto:Mike.Barrett" not in p, "no unrelated or unverified contacts"
 p = bill_page({**rec, "details": ["Gives states grants.", "More <details>."], "changes": ""})
-assert p.count('<p class=lede>Gives states grants.</p>') == 1 and "<p>Gives states grants.</p>" not in p
+assert p.count('<p>Gives states grants.</p>') == 1 and "class=lede" not in p
 assert "<p>More &lt;details&gt;.</p>" in p and "<h2>What it does" not in p and "<h2>What changes" not in p
 
 # State milestones come from Open States action classifications.
@@ -382,11 +396,26 @@ try:
 finally:
     plaingov.ask_json = original_ask
 
-# Pages show the specifics, the official record, and say so when we only have a title.
+# Full-text pages preserve conditions, changes and effective dates.
 p = bill_page({**rec, "details": ["Under 21 days old."], "changes": "Adds drop boxes.", "effective": "September 10, 2026",
-               "happened": "The Governor signed it on September 9, 2026.", "actions": ["2026-09-09: SIGNED INTO LAW"], "limited": True})
-assert all(x in p for x in ("<p>Under 21 days old.</p>", "<p>Adds drop boxes.</p>", "September 10, 2026", "only have this bill's official title",
-                            "The Governor signed it on September 9, 2026.", "<li>2026-09-09: SIGNED INTO LAW</li>")), p
+               "happened": "The Governor signed it on September 9, 2026.", "actions": ["2026-09-09: SIGNED INTO LAW"], "limited": False})
+assert all(x in p for x in ("<p>Under 21 days old.</p>", "<p>Adds drop boxes.</p>", "September 10, 2026",
+                            "The Governor signed it on September 9, 2026.", "Read the official bill and history")), p
+assert "SIGNED INTO LAW" not in p, "raw history stays on the official site"
+
+# H.R. 10908: title-only pages explain the limit once and don't repeat referral boilerplate.
+limited = {**rec, "id": "us/119-hr-10908", "label": "H.R. 10908", "limited": True,
+           "summary": "A bill in Congress would set up Universal Savings Accounts and expand transparency, competition, and patient rights in health care.",
+           "details": ["The title is the only text available for this bill. The Speaker will decide how long each committee has to act."],
+           "changes": "It was referred to two committees.",
+           "happened": "On October 26, 2026, the bill was referred to the Committee on Energy and Commerce and the Committee on Ways and Means.",
+           "actions": ["2026-10-26: " + referral + " For a period to be subsequently determined by the Speaker."]}
+body = bill_page(limited).split('<main id="main" class="wrap">')[1].split('</main>')[0]
+assert body.count("referred") == 1 and "Speaker" not in body and "<strong>Next:" not in body
+assert body.count("official title and description") == 1 and "effects on people aren’t confirmed" in body
+assert "Universal Savings Accounts" in body and body.count("October 26, 2026") == 1
+assert "As of Oct 26, 2026" not in body
+
 # Missing metrics stay unavailable; only known milestone posts enter link groups.
 rows = [{"id": "1", "bill": "us/a", "stage": "It's law", "where": "federal", "milestone": True, "link": True, "question": False, "hours_et": "06-12", "impression_count": 100, "like_count": 3},
         {"id": "2", "bill": "states/x", "stage": "Passed the Senate", "where": "state", "milestone": True, "link": False, "question": True, "hours_et": "18-24", "impression_count": 40}]
