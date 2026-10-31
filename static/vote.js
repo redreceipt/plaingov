@@ -1,38 +1,53 @@
-// Where-to-vote lookup, in the browser: address -> Google Civic Information API; location -> address via OpenStreetMap.
+// Where-to-vote lookup, in the browser: address -> Google Civic Information API; address <-> coordinates via OpenStreetMap.
 const form = document.getElementById("where"), out = document.getElementById("result");
 const el = (tag, text, props) => Object.assign(document.createElement(tag), {textContent: text || "", ...props});
 const say = (...nodes) => out.replaceChildren(...nodes);
-const day = d => new Date(d + "T12:00").toLocaleDateString("en-US", {month: "short", day: "numeric"});
-const found = r => r && ["pollingLocations", "earlyVoteSites", "dropOffLocations"].some(k => r[k] && r[k].length);
+let coords = null;  // the reader's location, to list the nearest of a county's many vote centers first
+
+// shortcut: OpenStreetMap's free geocoder allows ~1 request/second; switch to a paid geocoder if traffic outgrows it.
+const osm = async (path, q) => (await fetch(`https://nominatim.openstreetmap.org/${path}?` + new URLSearchParams({format: "jsonv2", addressdetails: 1, ...q}))).json();
+
+// Hours come one day per line ("Mon, Oct 19: 8:30 am - 6:00 pm"); keep today and later. Null when every dated day has passed.
+function upcoming(hours) {
+  const today = new Date().setHours(0, 0, 0, 0), lines = (hours || "").split("\n").filter(Boolean);
+  const left = lines.filter(l => { const m = l.match(/^\w{3}, (\w{3} \d{1,2}):/); return !m || new Date(`${m[1]}, ${new Date().getFullYear()}`) >= today; });
+  return lines.length && !left.length ? null : left.slice(0, 3).join("\n") + (left.length > 3 ? "\n…and more days" : "");
+}
 
 function place(p) {
   const a = p.address || {}, where = [a.line1, a.line2, a.line3, [a.city, a.state, a.zip].filter(Boolean).join(" ")].filter(Boolean).join(", ");
   const li = el("li");
   li.append(el("strong", a.locationName || p.name || where), el("span", where, {className: "meta"}));
-  const dates = p.startDate && p.endDate && p.startDate !== p.endDate ? day(p.startDate) + " – " + day(p.endDate) : "";
-  for (const t of [dates, p.pollingHours, p.notes]) if (t) li.append(el("span", t, {className: "meta"}));
+  if (p.hours) li.append(el("span", p.hours, {className: "meta"}));
+  if (p.notes) li.append(el("span", p.notes, {className: "meta"}));
   li.append(el("a", "Directions →", {href: "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(where)}));
   return li;
 }
 
-function show(r) {
-  const input = (r && r.normalizedInput) || {}, st = input.state || "";
+function nearest(list) {
+  const dist = p => coords && p.latitude ? (p.latitude - coords[0]) ** 2 + ((p.longitude - coords[1]) * Math.cos(coords[0] * Math.PI / 180)) ** 2 : 0;
+  return (list || []).map(p => ({...p, hours: upcoming(p.pollingHours)})).filter(p => p.hours !== null).sort((a, b) => dist(a) - dist(b)).slice(0, 3);
+}
+
+function show(r, st) {
+  const input = (r && r.normalizedInput) || {};
+  st = input.state || st;
   const body = ((r && r.state) || [{}])[0].electionAdministrationBody || {};
-  const official = (document.getElementById("vote-" + st) || {}).href || body.votingLocationFinderUrl || body.electionInfoUrl;
-  const check = official ? el("a", "your state's official lookup", {href: official}) : "your local election office";
-  if (!found(r)) {
-    const p = el("p", r ? "We don't have voting locations for that address yet. Try " : "We couldn't find that address. Check it, or try ");
+  const links = document.querySelectorAll("a[id^=vote-]");
+  const official = (document.getElementById("vote-" + st) || (links.length === 1 && links[0]) || {}).href || body.votingLocationFinderUrl;
+  const check = official ? el("a", "your state's official lookup", {href: official}) : "your state's official lookup below";
+  const sections = [["Your polling place on Election Day", r && r.pollingLocations], ["Vote early", r && r.earlyVoteSites], ["Drop off a mail ballot", r && r.dropOffLocations]]
+    .map(([title, list]) => [title, nearest(list), (list || []).length]).filter(([, list]) => list.length);
+  if (!sections.length) {
+    const p = el("p", "We don't have voting locations for that address yet. Try ");
     p.append(check, ".");
     return say(p);
   }
   const nodes = [el("p", "For " + [input.line1, input.city, st].filter(Boolean).join(", ") + ". Not your home address? Change it above.", {className: "meta"})];
-  const today = new Date().toLocaleDateString("en-CA");  // YYYY-MM-DD, local
-  for (let [title, list] of [["Your polling place on Election Day", r.pollingLocations], ["Vote early", r.earlyVoteSites], ["Drop off a mail ballot", r.dropOffLocations]]) {
-    list = (list || []).filter(p => !p.endDate || p.endDate >= today);
-    if (!list.length) continue;
+  for (const [title, list, total] of sections) {
     const ul = el("ul", "", {className: "list"});
-    ul.append(...list.slice(0, 3).map(place));
-    nodes.push(el("h2", title), ul);
+    ul.append(...list.map(place));
+    nodes.push(el("h2", title + (total > list.length ? ` (${coords ? "nearest" : "first"} ${list.length} of ${total})` : "")), ul);
   }
   const p = el("p", "Locations can change. Double-check with ", {className: "meta"});
   p.append(check, ".");
@@ -43,17 +58,22 @@ async function lookup(address, electionId) {
   const q = new URLSearchParams({address, key: form.dataset.key});
   if (electionId) q.set("electionId", electionId);
   const res = await fetch("https://www.googleapis.com/civicinfo/v2/voterinfo?" + q);
-  return res.ok ? res.json() : null;
+  return res.ok ? res.json() : null;  // 400 "Election unknown" when there's no data for that area
 }
 
+form.address.oninput = () => coords = null;
 form.onsubmit = async ev => {
   ev.preventDefault();
   say(el("p", "Looking up where you vote…"));
+  const address = form.address.value;
+  const geo = coords ? null : osm("search", {q: address, countrycodes: "us", limit: 1}).then(([m]) => m).catch(() => null);
   try {
-    let r = await lookup(form.address.value);
+    let r = await lookup(address);
     // Several elections on the same day return no locations until one is picked.
-    if (r && !found(r) && r.otherElections && r.election) r = await lookup(form.address.value, r.election.id);
-    show(r);
+    if (r && !r.pollingLocations && !r.earlyVoteSites && !r.dropOffLocations && r.otherElections && r.election) r = await lookup(address, r.election.id);
+    const m = await geo;
+    if (m) coords = [+m.lat, +m.lon];
+    show(r, m && (m.address["ISO3166-2-lvl4"] || "").replace("US-", ""));
   } catch {
     show(null);
   }
@@ -65,11 +85,10 @@ document.getElementById("locate").onclick = () => {
   say(el("p", "Finding your address…"));
   navigator.geolocation.getCurrentPosition(async pos => {
     try {
-      // shortcut: OpenStreetMap's free geocoder allows ~1 request/second; switch to a paid geocoder if traffic outgrows it.
-      const q = new URLSearchParams({format: "jsonv2", addressdetails: 1, zoom: 18, lat: pos.coords.latitude, lon: pos.coords.longitude});
-      const a = (await (await fetch("https://nominatim.openstreetmap.org/reverse?" + q)).json()).address;
+      const a = (await osm("reverse", {zoom: 18, lat: pos.coords.latitude, lon: pos.coords.longitude})).address;
       const st = (a["ISO3166-2-lvl4"] || "").replace("US-", "");
       form.address.value = [[a.house_number, a.road].filter(Boolean).join(" "), a.city || a.town || a.village || a.hamlet, [st, a.postcode].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+      coords = [pos.coords.latitude, pos.coords.longitude];
       if (a.house_number) return form.requestSubmit();
       say(el("p", "Add your house number, then tap “Find where I vote.”"));
       form.address.focus();

@@ -1291,6 +1291,7 @@ table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;
 .vote{background:#fff;border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:.8rem 1rem;margin:1.25rem 0}
 .vote a{font-weight:700}
 .vote label{display:block}.vote input{font:inherit;width:100%;padding:.6rem .8rem;border:1px solid var(--line);border-radius:10px;margin:.6rem 0 0}
+#result .meta{white-space:pre-line}
 button.alt{background:#fff;color:var(--accent);border:1px solid var(--accent)}
 button{font:inherit;font-weight:700;color:#fff;background:var(--accent);border:0;border-radius:10px;padding:.6rem 1.1rem;cursor:pointer}
 @media (max-width:32rem){.hero h1{font-size:1.9rem}h1{font-size:1.6rem}.top nav{gap:.8rem}.top nav a{font-size:.9rem}}
