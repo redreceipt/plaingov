@@ -2,7 +2,7 @@
 """PlainGov: what your government is doing, in plain English.
 
 Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post queue
-       plaingov.py scrape     daemon: run each state legislature's scraper about daily -> pages + post queue + alerts
+       plaingov.py scrape     daemon: run each state legislature's scraper about daily -> pages + post queue + journal logs
        plaingov.py post       post the most interesting queued update to X (@plaingov)
        plaingov.py site       rebuild the site only
        plaingov.py restage    repair saved status fields without AI calls or posts
@@ -688,7 +688,21 @@ def state_update(b):
 HEALTH = f"{DATA}/state/health.json"
 
 
-pending = []  # alerts are batched so a mass failure sends one digest, not one email per state
+pending = []  # weekly X report notifications only; scraper events go to journald
+
+
+def scraper_event(event, st, message, *, level="warning"):
+    """Emit one structured log entry to stdout, collected by systemd's journal."""
+    record = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "level": level,
+        "component": "scraper",
+        "event": event,
+        "state": st,
+        "message": message,
+    }
+    with lock:
+        print(json.dumps(record, ensure_ascii=False), flush=True)
 
 
 def alert(subject, body):
@@ -704,7 +718,7 @@ def flush_alerts():
         pending.clear()
     if not batch:
         return
-    subject = batch[0][0] if len(batch) == 1 else f"PlainGov: {len(batch)} scraper alerts"
+    subject = batch[0][0] if len(batch) == 1 else f"PlainGov: {len(batch)} notifications"
     body = "\n\n----\n\n".join(f"{s}\n\n{b}" for s, b in batch)
     push = "; ".join(s.removeprefix("PlainGov: ") for s, _ in batch)
     for url, payload in (("http://169.254.169.254/gateway/email/send", {"to": ALERT_EMAIL, "subject": subject, "body": body}),
@@ -835,11 +849,11 @@ def legiscan_state(st):
         h = set_health(st, status="ok", error="", last_end=time.time(), last_ok=time.time(), bills=len(found), source="LegiScan",
                        milestones=new, page_failures=failed)
         if prev.get("status") == "failed":
-            alert(f"PlainGov: {STATES[st]} recovered", f"{STATES[st]} updated from LegiScan again.")
+            scraper_event("legiscan_recovered", st, f"{STATES[st]} updated from LegiScan again.", level="info")
     except Exception as ex:
         h = set_health(st, status="failed", error=repr(ex)[-800:], last_end=time.time())
         if prev.get("status") != "failed":
-            alert(f"PlainGov: {STATES[st]} (LegiScan) failed", f"{ex!r}\n\nStatus page: {SITE_URL}/status/")
+            scraper_event("legiscan_failed", st, f"{ex!r}\n\nStatus page: {SITE_URL}/status/")
     return h
 
 
@@ -915,10 +929,10 @@ def scrape_state(st):
         up = site_status(site)
         cause = (f"The {name} legislature's website looks {up}, so this is probably on their end." if up.startswith("down")
                  else f"The {name} legislature's website is {up}, so the scraper probably needs a fix (their site may have changed).")
-        alert(f"PlainGov: {name} scraper failed", f"{cause}\n\nError:\n{error[-1500:]}\n\nStatus page: {SITE_URL}/status/\n"
+        scraper_event("scraper_failed", st, f"{cause}\n\nError:\n{error[-1500:]}\n\nStatus page: {SITE_URL}/status/\n"
               f"Rerun: ssh plaingov.exe.xyz 'cd plaingov && python3 plaingov.py scrape {st}'")
     elif status == "ok" and prev.get("status") == "failed":
-        alert(f"PlainGov: {name} scraper recovered", f"{name} scraped {bills} bills successfully again.")
+        scraper_event("scraper_recovered", st, f"{name} scraped {bills} bills successfully again.", level="info")
     if status == "failed" and os.environ.get("LEGISCAN_API_KEY") and time.time() - prev.get("backup_at", 0) > RESCRAPE_HOURS * 3600:
         h = legiscan_backup(st)
     return h
@@ -928,7 +942,7 @@ def check_stale(health):
     """Alert once when a state hasn't had a good scrape in 2 days (e.g. it keeps timing out)."""
     for st, h in health.items():
         if h.get("status") != "needs setup" and time.time() - h.get("last_ok", time.time()) > 48 * 3600 and not h.get("stale_alerted"):
-            alert(f"PlainGov: {STATES[st]} hasn't updated in 2 days", f"Last error:\n{h.get('error', '')}\n\nStatus page: {SITE_URL}/status/")
+            scraper_event("scraper_stale", st, f"Last error:\n{h.get('error', '')}\n\nStatus page: {SITE_URL}/status/")
             set_health(st, stale_alerted=True)
         elif h.get("stale_alerted") and time.time() - h.get("last_ok", 0) < 48 * 3600:
             set_health(st, stale_alerted=False)
@@ -938,7 +952,7 @@ def scrape(only=None):
     """Daemon: keep PARALLEL scrapers busy, each state about every RESCRAPE_HOURS; pull scraper fixes daily."""
     if only:
         print(scrape_state(only.upper()))
-        return flush_alerts()
+        return
     pool, running, pulled, started = ThreadPoolExecutor(PARALLEL), {}, 0, time.time()
     for st, h in load(HEALTH, {}).items():  # scrapes cut off by a restart start over right away
         if h.get("status") == "running":
@@ -954,7 +968,7 @@ def scrape(only=None):
                 running.pop(st)
                 if f.exception():
                     set_health(st, status="failed", error=repr(f.exception()), last_end=time.time())
-                    alert(f"PlainGov: {STATES[st]} run crashed", repr(f.exception()))
+                    scraper_event("scraper_crashed", st, repr(f.exception()), level="error")
         health = load(HEALTH, {})
         # Failures are usually a site hiccup (500s, timeouts), so retry those after 2 hours instead of a day.
         wait = lambda h: (2 if h.get("status") == "failed" else RESCRAPE_HOURS) * 3600
@@ -963,7 +977,6 @@ def scrape(only=None):
         for st in due[:PARALLEL - len(running)]:
             running[st] = pool.submit(scrape_state, st)
         check_stale(health)
-        flush_alerts()
         # Public heartbeat for the off-box watchdog (.github/workflows/watchdog.yml): daemon alive + states succeeding.
         write(f"{DATA}/site/status/health.json", json.dumps({"updated": time.time(), "started": started, "states": {
             st: {k: h.get(k) for k in ("status", "last_ok", "bills")} for st, h in health.items()}}))
