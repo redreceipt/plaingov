@@ -1,6 +1,26 @@
-import json, os, tempfile, time, urllib.error
+import contextlib, io, json, os, tempfile, time, urllib.error
 import plaingov
 from plaingov import ai_stages, take_pages, posting_hours, report_text, doc_text, rewrite, legiscan_items, stage_of, legiscan_update, save_ids, bill_page, bill_stage, by_stage, sponsor_name, state_stage, state_update, status_body, tweet_text, us_stage
+
+# Scraper state changes write structured journal entries, not exe.dev emails or pushes.
+buffer = io.StringIO()
+original_fetch = plaingov.fetch
+try:
+    plaingov.fetch = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("scraper logging made a network request"))
+    with contextlib.redirect_stdout(buffer):
+        plaingov.scraper_event("scraper_failed", "SC", "Timed out")
+        plaingov.scraper_event("scraper_recovered", "SC", "Back online", level="info")
+        plaingov.scraper_event("scraper_crashed", "GA", "Unexpected error", level="error")
+finally:
+    plaingov.fetch = original_fetch
+logs = [json.loads(line) for line in buffer.getvalue().splitlines()]
+assert [(row["event"], row["state"], row["level"]) for row in logs] == [
+    ("scraper_failed", "SC", "warning"),
+    ("scraper_recovered", "SC", "info"),
+    ("scraper_crashed", "GA", "error"),
+]
+assert [row["message"] for row in logs] == ["Timed out", "Back online", "Unexpected error"]
+assert all(row["component"] == "scraper" and row["timestamp"].endswith("+00:00") for row in logs)
 
 rec = {"id": "us/119-s-4618", "where": "U.S. Congress", "state": None, "label": "S. 4618", "resolution": False,
        "title": "School Counseling Act", "official_url": "https://www.congress.gov/bill/119th-congress/senate-bill/4618",
