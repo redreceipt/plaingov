@@ -1290,10 +1290,11 @@ table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;
 .fine{font-size:.8rem;color:var(--soft);margin-top:1.25rem}
 .vote{background:#fff;border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:.8rem 1rem;margin:1.25rem 0}
 .vote a{font-weight:700}
-.vote label{display:block}.vote input{font:inherit;width:100%;padding:.6rem .8rem;border:1px solid var(--line);border-radius:10px;margin:.6rem 0 0}
+.vote label{display:block}
+.vote .row{display:flex;flex-wrap:wrap;gap:.5rem;margin:.6rem 0 .2rem}.vote input{flex:9 1 14rem;min-width:0;font:inherit;padding:.6rem .8rem;border:1px solid var(--line);border-radius:10px}.vote .row button{flex:1 0 auto}
 #result .meta{white-space:pre-line}
-button.alt{background:#fff;color:var(--accent);border:1px solid var(--accent)}
 button{font:inherit;font-weight:700;color:#fff;background:var(--accent);border:0;border-radius:10px;padding:.6rem 1.1rem;cursor:pointer}
+button.link{display:inline-flex;align-items:center;gap:.35rem;background:none;color:var(--accent);font-weight:600;padding:.5rem 0}
 @media (max-width:32rem){.hero h1{font-size:1.9rem}h1{font-size:1.6rem}.top nav{gap:.8rem}.top nav a{font-size:.9rem}}
 @media (max-width:26rem){.top nav a[href="/about/"]{display:none}}
 """
@@ -1519,9 +1520,10 @@ PRIVACY = """<h1>Privacy</h1>
 <p class=lede>Short version: we don't track you.</p>
 <p>No accounts, no ads, no cookies. We count visits with <a href="https://vercel.com/docs/analytics/privacy-policy">Vercel Web Analytics</a>,
 which doesn't use cookies or store personal info. It just tells us things like how many people visited and which pages they read.</p>
-<p>When you look up where to vote, your browser sends the address you type to Google's
-<a href="https://developers.google.com/civic-information">Civic Information API</a>. If you tap “Use my location,” it first sends your
-location to <a href="https://nominatim.org">OpenStreetMap</a> to find your address. We never see or store either.</p>
+<p>When you look up where to vote, your browser sends the address or ZIP code you type to Google's
+<a href="https://developers.google.com/civic-information">Civic Information API</a> and to <a href="https://nominatim.org">OpenStreetMap</a>,
+which finds it on a map so we can list the nearest places first. If you tap “Use my location,” your location goes to OpenStreetMap to find your address.
+We never see or store any of it.</p>
 <p>If you email us, we'll only use your email to write back.</p>
 <p>Questions? Email <a href="mailto:hello@plaingov.com">hello@plaingov.com</a>.</p>
 <p class=meta>Last updated October 31, 2026.</p>"""
@@ -1592,13 +1594,14 @@ def election_day():
 
 
 def vote_form():
-    """Address or location -> polling place, early voting and drop boxes, looked up in the browser (static/vote.js)."""
+    """Address, ZIP or location -> polling place, early voting and drop boxes, looked up in the browser (static/vote.js)."""
     key = os.environ.get("CIVIC_API_KEY")  # browser key: Google limits it to plaingov.com and the Civic Information API
     return key and (f'<form id=where class=vote data-key="{e(key)}"><label for=address><strong>{election_day()}Find your polling place.</strong> '
-                    "It depends on your home address.</label>"
-                    '<input id=address name=address autocomplete=street-address required placeholder="123 Main St, Greenville, SC">'
-                    '<p><button>Find where I vote</button> <button id=locate type=button class=alt>Use my location</button></p>'
-                    "<span class=meta>Your address goes straight from your browser to Google's Civic Information API (location: © OpenStreetMap). "
+                    "Enter your home address or ZIP code.</label><div class=row>"
+                    '<input id=address name=address autocomplete=street-address enterkeyhint=search required placeholder="123 Main St, Greenville, SC">'
+                    '<button>Find where I vote</button></div><button id=locate type=button class=link>'
+                    '<svg width=18 height=18 viewBox="0 0 24 24" fill=currentColor aria-hidden=true><path d="M21 3 3 10.5l7.5 3L13.5 21z"/></svg>Use my location</button>'
+                    "<span class=meta>Your address goes straight from your browser to Google and OpenStreetMap (© OpenStreetMap contributors). "
                     "PlainGov never sees it.</span></form><div id=result role=status aria-live=polite></div><script src=/vote.js defer></script>")
 
 
