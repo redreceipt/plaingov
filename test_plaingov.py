@@ -576,5 +576,15 @@ with tempfile.TemporaryDirectory() as plaingov.DATA:
     assert sc == open(f"{plaingov.DATA}/site/states/sc/index.html").read() and 'href="https://plaingov.com/states/sc/"' in sc
     assert f'href="{plaingov.e(plaingov.VOTE["SC"])}">Find where to vote in South Carolina' in sc
     vote = open(f"{plaingov.DATA}/site/vote/index.html").read()
-    assert vote.count("<li><a id=\"vote-") == 50 and "id=locate" in vote and "/vote/" in open(f"{plaingov.DATA}/site/us/index.html").read()
+    assert vote.count("<li><a id=\"vote-") == 50 and "id=where" not in vote and "/vote/" in open(f"{plaingov.DATA}/site/us/index.html").read()
+    # With a Civic API key, the lookup form appears on /vote/ and state pages; the official link stays as the fallback.
+    os.environ["CIVIC_API_KEY"] = 'k"ey'
+    try:
+        plaingov.build_site()
+    finally:
+        del os.environ["CIVIC_API_KEY"]
+    for path in ("vote", "sc"):
+        html = open(f"{plaingov.DATA}/site/{path}/index.html").read()
+        assert 'data-key="k&quot;ey"' in html and "src=/vote.js" in html and 'id="vote-SC"' in html, path
+    assert os.path.exists(f"{plaingov.DATA}/site/vote.js")
 print("ok")
