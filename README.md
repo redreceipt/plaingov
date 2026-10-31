@@ -89,7 +89,7 @@ Only verified sponsor contacts appear on bill pages, without generic committee d
 
 ## Where to vote
 
-[plaingov.com/vote](https://plaingov.com/vote/) and every state page (also at short links like `/sc/`) link to the state's official where-to-vote lookup (`VOTE`, from [NASS's list](https://www.nass.org/can-I-vote/find-your-polling-place)). With `CIVIC_API_KEY` set, those pages also look up the reader's polling place, early voting sites and ballot drop boxes in the browser: the address goes straight to Google's [Civic Information API](https://developers.google.com/civic-information) (data from the Voting Information Project), and “Use my location” first turns the location into an address with OpenStreetMap's Nominatim. PlainGov never sees either. Without a key, pages show only the official links. Update `ELECTION` after each general election.
+[plaingov.com/vote](https://plaingov.com/vote/) and every state page (also at short links like `/sc/`) link to the state's official where-to-vote lookup (`VOTE`, from [NASS's list](https://www.nass.org/can-I-vote/find-your-polling-place)). With `CIVIC_API_KEY` set, those pages also look up the reader's polling place, early voting sites and ballot drop boxes in the browser (a ZIP code or town shows just the area's early voting and drop boxes): the address goes straight to Google's [Civic Information API](https://developers.google.com/civic-information) (data from the Voting Information Project), and to OpenStreetMap's Nominatim, which places it on a map (or turns “Use my location” into an address) to list the nearest sites first. PlainGov never sees any of it. Without a key, pages show only the official links. Update `ELECTION` after each general election.
 
 ## Sponsor links
 
