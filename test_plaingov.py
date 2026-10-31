@@ -567,4 +567,14 @@ finally:
     plaingov.time.time, plaingov.x_api = original_time, original_x_api
     plaingov.post_best, plaingov.report = original_post_best, original_report
 temporary_data.cleanup()
+
+# Every state links to an official HTTPS where-to-vote lookup, on its page, its short link and /vote/.
+assert set(plaingov.VOTE) == set(plaingov.STATES) and all(u.startswith("https://") for u in plaingov.VOTE.values())
+with tempfile.TemporaryDirectory() as plaingov.DATA:
+    plaingov.build_site()
+    sc = open(f"{plaingov.DATA}/site/sc/index.html").read()
+    assert sc == open(f"{plaingov.DATA}/site/states/sc/index.html").read() and 'href="https://plaingov.com/states/sc/"' in sc
+    assert f'href="{plaingov.e(plaingov.VOTE["SC"])}">Find where to vote in South Carolina' in sc
+    vote = open(f"{plaingov.DATA}/site/vote/index.html").read()
+    assert vote.count("<li><a id=\"vote-") == 50 and "id=locate" in vote and "/vote/" in open(f"{plaingov.DATA}/site/us/index.html").read()
 print("ok")

@@ -1288,7 +1288,11 @@ table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;
 .foot p{margin:.4rem 0 0}
 .foot nav{display:flex;flex-wrap:wrap;gap:.4rem 1.1rem;max-width:25rem}.foot nav a{color:var(--muted)}
 .fine{font-size:.8rem;color:var(--soft);margin-top:1.25rem}
+.vote{background:#fff;border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:.8rem 1rem;margin:1.25rem 0}
+.vote a{font-weight:700}
+button{font:inherit;font-weight:700;color:#fff;background:var(--accent);border:0;border-radius:10px;padding:.6rem 1.1rem;cursor:pointer}
 @media (max-width:32rem){.hero h1{font-size:1.9rem}h1{font-size:1.6rem}.top nav{gap:.8rem}.top nav a{font-size:.9rem}}
+@media (max-width:26rem){.top nav a[href="/about/"]{display:none}}
 """
 
 
@@ -1311,10 +1315,10 @@ def page(title, desc, body, path=""):
 <style>{CSS}</style><script defer src="/_vercel/insights/script.js"></script></head><body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="top"><div class="wrap"><a class="brand" href="/" aria-label="PlainGov home">{brand}</a>
-<nav aria-label="Main"><a href="/us/">Congress</a><a href="/states/">States</a><a href="/about/">About</a></nav></div></header>
+<nav aria-label="Main"><a href="/vote/">Vote</a><a href="/us/">Congress</a><a href="/states/">States</a><a href="/about/">About</a></nav></div></header>
 <main id="main" class="wrap">{body}</main>
 <footer class="site-foot wrap"><div class="foot"><div><a class="brand" href="/">{brand}</a><p>Government, in plain English. Free and nonpartisan.</p></div>
-<nav aria-label="Footer"><a href="/us/">Congress</a><a href="/states/">States</a><a href="/about/">About</a><a href="/status/">Data status</a>
+<nav aria-label="Footer"><a href="/vote/">Where to vote</a><a href="/us/">Congress</a><a href="/states/">States</a><a href="/about/">About</a><a href="/status/">Data status</a>
 <a href="/privacy/">Privacy</a><a href="https://x.com/plaingov">Follow us on X</a><a href="mailto:hello@plaingov.com">Contact</a></nav></div>
 <p class="fine">We use AI to turn official bill text into plain English. It can miss things, so check the official link on each page before you rely on it. This isn't legal advice. © {time.strftime('%Y')} PlainGov.</p></footer>
 </body></html>
@@ -1512,13 +1516,109 @@ PRIVACY = """<h1>Privacy</h1>
 <p class=lede>Short version: we don't track you.</p>
 <p>No accounts, no ads, no cookies. We count visits with <a href="https://vercel.com/docs/analytics/privacy-policy">Vercel Web Analytics</a>,
 which doesn't use cookies or store personal info. It just tells us things like how many people visited and which pages they read.</p>
+<p>If you tap “Use my location” on our voting page, your browser sends your approximate location to the U.S. Census Bureau's
+<a href="https://geocoding.geo.census.gov">geocoder</a> to find your state. We never see or store it.</p>
 <p>If you email us, we'll only use your email to write back.</p>
 <p>Questions? Email <a href="mailto:hello@plaingov.com">hello@plaingov.com</a>.</p>
-<p class=meta>Last updated October 23, 2026.</p>"""
+<p class=meta>Last updated October 31, 2026.</p>"""
 
 NOT_FOUND = """<h1>Hmm, that page doesn't exist.</h1>
 <p class=lede>It may have moved, or the link might be a little off.</p>
 <p><a class=more href="/">Go to the home page →</a></p>"""
+
+ELECTION = "2026-11-03"  # next general election; update after each one
+# Each state's official where-to-vote lookup, from NASS's list (nass.org/can-I-vote/find-your-polling-place), checked Oct 31, 2026.
+VOTE = {
+    "AL": "https://myinfo.alabamavotes.gov/voterview",
+    "AK": "https://akelections.maps.arcgis.com/apps/webappviewer/index.html?id=579890d66c7e40ae9f7cc227d76669b1",
+    "AZ": "https://my.arizona.vote/WhereToVote.aspx?s=address",
+    "AR": "https://www.voterview.ar-nova.org/",
+    "CA": "https://www.sos.ca.gov/elections/polling-place/",
+    "CO": "https://www.sos.state.co.us/voter/pages/pub/olvr/findVoterReg.xhtml",
+    "CT": "https://portaldir.ct.gov/sots/LookUp.aspx",
+    "DE": "https://ivote.de.gov/voterview",
+    "FL": "https://registration.dos.fl.gov/en/CheckVoterStatus/Index",
+    "GA": "https://mvp.sos.ga.gov/s/",
+    "HI": "https://elections.hawaii.gov/voting/voting-in-hawaii/",
+    "ID": "https://elections.sos.idaho.gov/ElectionLink/ElectionLink/ViewPollingLocation.aspx",
+    "IL": "https://ova.elections.il.gov/PollingPlaceLookup.aspx",
+    "IN": "https://indianavoters.in.gov/PublicSite/PublicMain.aspx",
+    "IA": "https://sos.iowa.gov/elections/voterreg/pollingplace/search.aspx",
+    "KS": "https://myvoteinfo.voteks.org/VoterView",
+    "KY": "https://vrsws.sos.ky.gov/ovrweb/govoteky",
+    "LA": "https://voterportal.sos.la.gov/",
+    "ME": "https://www.maine.gov/portal/government/edemocracy/voter_lookup.php",
+    "MD": "https://voterservices.elections.maryland.gov/PollingPlaceSearch",
+    "MA": "https://www.sec.state.ma.us/WhereDoIVoteMA/WhereDoIVote",
+    "MI": "https://mvic.sos.state.mi.us/Voter/index",
+    "MN": "https://pollfinder.sos.state.mn.us/",
+    "MS": "https://myelectionday.sos.state.ms.us/VoterOutreach/Pages/VOSearch.aspx",
+    "MO": "https://voteroutreach.sos.mo.gov/portal",
+    "MT": "https://app.mt.gov/voterinfo/",
+    "NE": "https://www.votercheck.necvr.ne.gov/",
+    "NV": "https://nvsos.gov/votersearch/",
+    "NH": "https://app.sos.nh.gov/viphome",
+    "NJ": "https://www.nj.gov/state/elections/vote-polling-location.shtml",
+    "NM": "https://voterportal.servis.sos.state.nm.us/WhereToVote.aspx",
+    "NY": "https://voterlookup.elections.ny.gov/",
+    "NC": "https://vt.ncsbe.gov/PPLkup/",
+    "ND": "https://vip.sos.nd.gov/WhereToVote.aspx?tab=AddressandVotingTimes",
+    "OH": "https://www.ohiosos.gov/directories/find-my-polling-location",
+    "OK": "https://okvoterportal.okelections.gov/",
+    "OR": "https://sos.oregon.gov/voting/pages/drop-box-locator.aspx",
+    "PA": "https://www.pavoterservices.pa.gov/Pages/PollingPlaceInfo.aspx",
+    "RI": "https://vote.sos.ri.gov/Home/PollingPlaces?ActiveFlag=2",
+    "SC": "https://vrems.scvotes.sc.gov/Voter/Login?PageMode=PollingPlace",
+    "SD": "https://vip.sdsos.gov/VIPLogin.aspx",
+    "TN": "https://tnmap.tn.gov/voterlookup/",
+    "TX": "https://teamrv-mvp.sos.texas.gov/MVP/mvp.do",
+    "UT": "https://votesearch.utah.gov/voter-search/search/search-by-address/how-and-where-can-i-vote",
+    "VT": "https://mvp.vermont.gov",
+    "VA": "https://vote.elections.virginia.gov/VoterInformation/Lookup/polling",
+    "WA": "https://voter.votewa.gov/WhereToVote.aspx",
+    "WV": "https://apps.sos.wv.gov/elections/voter/index.aspx",
+    "WI": "https://myvote.wi.gov/en-us/FindMyPollingPlace",
+    "WY": "https://myelectionday.sos.wyo.gov/WYVOTES/Pages/VOSearch.aspx",
+}
+# Location -> state via the Census geocoder (JSONP: it sends no CORS headers); coordinates are rounded to ~100 m.
+LOCATE_JS = """const found = document.getElementById("found");
+const fail = () => found.textContent = "We couldn't tell where you are. Pick your state below.";
+document.getElementById("locate").onclick = () => {
+  found.textContent = "Finding your state…";
+  if (!navigator.geolocation) return fail();
+  navigator.geolocation.getCurrentPosition(p => {
+    window.foundState = r => {
+      const st = (r.result.geographies.States[0] || {}).STUSAB, a = document.getElementById("vote-" + st);
+      if (!a) return fail();
+      found.replaceChildren("You're in " + a.dataset.name + ". ", Object.assign(document.createElement("a"), {href: a.href, textContent: "Find where to vote →"}));
+    };
+    const s = document.createElement("script");
+    s.onerror = fail;
+    s.src = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates?benchmark=Public_AR_Current&vintage=Current_Current&layers=States&format=jsonp&callback=foundState"
+      + "&x=" + p.coords.longitude.toFixed(3) + "&y=" + p.coords.latitude.toFixed(3);
+    document.head.append(s);
+  }, fail, {timeout: 15000, maximumAge: 600000});
+};"""
+
+
+def election_day():
+    """'Election Day is Tuesday, November 3. ' until it passes."""
+    return f"Election Day is {date(ELECTION, '%A, %B %-d')}. " if time.strftime("%Y-%m-%d") <= ELECTION else ""
+
+
+def vote_box(st):
+    host = urllib.parse.urlparse(VOTE[st]).netloc.removeprefix("www.")
+    return (f'<p class=vote>{election_day()}<a href="{e(VOTE[st])}">Find where to vote in {STATES[st]} →</a>'
+            f'<span class=meta>{STATES[st]}\'s official lookup on {e(host)}. Federal, state and local races share one ballot.</span></p>')
+
+
+def vote_body():
+    grid = "".join(f'<li><a id="vote-{st}" data-name="{n}" href="{e(VOTE[st])}">{n}<span class=meta>{e(urllib.parse.urlparse(VOTE[st]).netloc.removeprefix("www."))}</span></a></li>'
+                   for st, n in sorted(STATES.items(), key=lambda kv: kv[1]))
+    return (f"<h1>Where do I vote?</h1><p class=lede>{election_day()}Congress, state and local races are all on one ballot, "
+            "so you vote for all of them in the same place. Your state's official lookup shows where and how to vote.</p>"
+            '<p><button id=locate type=button>Use my location</button></p><p id=found class=vote role=status aria-live=polite>Or pick your state below.</p>'
+            f"<ul class=grid>{grid}</ul><script>{LOCATE_JS}</script>")
 
 
 def build_site():
@@ -1532,14 +1632,17 @@ def build_site():
     week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
     top = sorted((r for r in recs if r["date"] >= week), key=lambda r: r.get("interest") or 0, reverse=True)[:6]
     home = f"""<section class=hero><h1>What's going on in government, in plain English.</h1>
-<p class=lede>New bills and laws from Congress and all 50 states, explained like a friend would. No jargon, no spin.</p></section>
+<p class=lede>New bills and laws from Congress and all 50 states, explained like a friend would. No jargon, no spin.</p>
+<p class=vote>{election_day()}<a href="/vote/">Find where to vote →</a></p></section>
 {'<h2>Biggest stories this week</h2>' + items(top) if top else ''}
 <h2>Latest from Congress</h2>{items(newest([r for r in us if r not in top], 6), False)}<a class=more href="/us/">See everything from Congress →</a>
 <h2>Latest from the states</h2>{items(newest([r for r in states if r not in top], 8))}<a class=more href="/states/">Pick your state →</a>"""
     pages = {
         "": ("PlainGov: Government, in plain English", "New bills and laws from Congress and all 50 states, explained like a friend would.", home),
         "us/": ("Congress · PlainGov", "What Congress is up to, in plain English.",
-                "<h1>Congress</h1><p class=lede>What the U.S. House and Senate are working on, newest first.</p>" + by_stage(us, False)),
+                "<h1>Congress</h1><p class=lede>What the U.S. House and Senate are working on, newest first.</p>"
+                f'<p class=vote>{election_day()}Voting for Congress? <a href="/vote/">Find where to vote →</a></p>' + by_stage(us, False)),
+        "vote/": ("Where do I vote? · PlainGov", "Find where to vote for Congress, state and local races, with your state's official lookup.", vote_body()),
         "about/": ("About · PlainGov", "What PlainGov is, where our info comes from, and how we use AI.", ABOUT),
         "privacy/": ("Privacy · PlainGov", "We don't track you. Here's the short version.", PRIVACY),
         "status/": ("Data status · PlainGov", "How fresh our info is for each state.", status_body(load(HEALTH, {}))),
@@ -1552,9 +1655,11 @@ def build_site():
     for st, n in STATES.items():
         pages[f"states/{st.lower()}/"] = (f"{n} · PlainGov", f"What {n} lawmakers are voting on, in plain English.",
             f"<p class=eyebrow><a href=\"/states/\">All states</a></p><h1>{n}</h1><p class=lede>What {n} lawmakers have been voting on lately.</p>"
-            + by_stage([r for r in states if r["state"] == st], False))
+            + vote_box(st) + by_stage([r for r in states if r["state"] == st], False))
     for path, (title, desc, body) in pages.items():
         write(f"{site}/{path}index.html", page(title, desc, body, path))
+        if path.startswith("states/") and len(path) == 10:  # short link: /sc/ is /states/sc/
+            write(f"{site}/{path[7:]}index.html", page(title, desc, body, path))
     write(f"{site}/404.html", page("Page not found · PlainGov", "That page doesn't exist.", NOT_FOUND))
     shutil.copytree(STATIC, site, dirs_exist_ok=True)
     write(f"{site}/site.webmanifest", json.dumps({"name": "PlainGov", "short_name": "PlainGov", "start_url": "/", "display": "browser",

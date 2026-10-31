@@ -86,6 +86,10 @@ Bill pages use plain paragraphs for the explanation, effective date and current 
 
 Only verified sponsor contacts appear on bill pages, without generic committee directories or representative finders. Massachusetts sponsors also show public office phone/email links from the same official roster row as their profile ID. No calls or messages are sent automatically.
 
+## Where to vote
+
+[plaingov.com/vote](https://plaingov.com/vote/) and every state page (also at short links like `/sc/`) link to the state's official where-to-vote lookup (`VOTE`, from [NASS's list](https://www.nass.org/can-I-vote/find-your-polling-place)). “Use my location” sends rounded coordinates from the browser to the Census geocoder to pick the state; PlainGov never sees them. Update `ELECTION` after each general election.
+
 ## Sponsor links
 
 Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them against the [House Clerk](https://clerk.house.gov/xml/lists/MemberData.xml) and [Senate](https://www.senate.gov/general/contact_information/senators_cfm.xml) current-member rosters. Verified matches link the sponsor’s name to an official profile/contact page. Senators link to Senate.gov's state contact directory, which lists both senators and their office details; individual senator sites blocked automated verification. The sponsor may not represent the reader.
