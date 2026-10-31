@@ -1,0 +1,10 @@
+[Unit]
+Description=Deploy plaingov's main branch after CI passes
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=exedev
+EnvironmentFile=/home/exedev/plaingov.env
+ExecStart=/home/exedev/plaingov/deploy.sh

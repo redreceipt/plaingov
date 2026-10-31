@@ -109,5 +109,7 @@ git clone https://github.com/redreceipt/plaingov ~/plaingov
 sudo cp ~/plaingov/*.service ~/plaingov/*.timer /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo apt-get install -y poppler-utils   # pdftotext, for bills published as PDFs
 sudo usermod -aG docker exedev
-sudo systemctl enable --now plaingov-web plaingov-scrape plaingov@congress.timer plaingov@post.timer
+sudo systemctl enable --now plaingov-web plaingov-scrape plaingov@congress.timer plaingov@post.timer plaingov-deploy.timer
 ```
+
+After that, `plaingov-deploy.timer` deploys `main` within 5 minutes of its GitHub checks passing: it fast-forwards, reinstalls the unit files, restarts the web server and scrape daemon (cut-off scrapes restart right away) and rebuilds the site. A commit with failing checks is never deployed. Logs: `sudo journalctl -u plaingov-deploy`.
