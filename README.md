@@ -56,7 +56,7 @@ Environment (`~/plaingov.env` on the VM, never committed):
 | `INDIANA_API_KEY` | activated IGA token from `apitoken.request@iga.in.gov` ([docs](https://docs.api.iga.in.gov/)) |
 | `VA_API_KEY` | activated Virginia LIS Partner API key ([registration](https://lis.virginia.gov/developers)); registration confirmation alone is not a key |
 | `LEGISCAN_API_KEY` | [LegiScan](https://legiscan.com/legiscan) key: sites that block us (IL, AK, NH), states waiting on keys, and backup while a scraper fails |
-| `ALERT_EMAIL` | where scraper alerts go (exe.dev only emails the VM owner) |
+| `ALERT_EMAIL` | where the weekly X engagement report goes (exe.dev only emails the VM owner) |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | @plaingov's OAuth 1.0a keys (read+write) |
 | `DRY_RUN` | `1` (default) prints posts instead of sending |
 | `MAX_PAGES_PER_DAY` | new AI-written pages per day across all feeds (default 200, about $0.80); newest first, the rest wait |
@@ -70,7 +70,9 @@ Deploy the code before adding keys and restarting `plaingov-scrape`; adding keys
 
 ## Monitoring
 
-After every state scrape, `health.json` records status, bill counts, and errors, and [plaingov.com/status](https://plaingov.com/status/) shows it publicly. You get an email and a phone push (exe.dev) when a state's scraper fails, its bill count drops by half, it hasn't succeeded in 2 days, or it recovers. While a scraper fails, LegiScan fills in that state (at most once a day, under the scraper's own bill IDs so nothing posts twice) and /status says "Using backup source". Each alert checks the legislature's website so it says whether their site is down or our scraper needs a fix. An hourly GitHub Actions [watchdog](.github/workflows/watchdog.yml) fails (and GitHub emails you) if the site is down, the daemon stops writing `status/health.json`, or no state succeeds for a day, so it catches the VM itself dying.
+After every state scrape, `health.json` records status, bill counts, and errors, and [plaingov.com/status](https://plaingov.com/status/) shows it publicly. Scraper failures, stale states, and recoveries write structured JSON lines to stdout; systemd captures them in its journal. Failures are warnings, unexpected worker crashes are errors, and recoveries are informational. To inspect them on exe.dev, run `sudo journalctl -u plaingov-scrape -o cat -f` (or add `--since today` instead of `-f` for recent history). Normal scraper events do **not** send emails or phone pushes.
+
+While a scraper fails, LegiScan fills in that state (at most once a day, under the scraper's own bill IDs so nothing posts twice) and /status says "Using backup source". The failure log checks the legislature's website so it says whether their site is down or our scraper needs a fix. The hourly off-box GitHub Actions [watchdog](.github/workflows/watchdog.yml) still fails if the site is down, the daemon stops writing `status/health.json`, or no state succeeds for a day; GitHub failure notifications remain available for major outages. The weekly X engagement report still uses email.
 
 ## Status repairs
 
