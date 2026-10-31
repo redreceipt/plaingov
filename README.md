@@ -56,6 +56,7 @@ Environment (`~/plaingov.env` on the VM, never committed):
 | `INDIANA_API_KEY` | activated IGA token from `apitoken.request@iga.in.gov` ([docs](https://docs.api.iga.in.gov/)) |
 | `VA_API_KEY` | activated Virginia LIS Partner API key ([registration](https://lis.virginia.gov/developers)); registration confirmation alone is not a key |
 | `LEGISCAN_API_KEY` | [LegiScan](https://legiscan.com/legiscan) key: sites that block us (IL, AK, NH), states waiting on keys, and backup while a scraper fails |
+| `CIVIC_API_KEY` | Google Civic Information API browser key, restricted to `https://plaingov.com/*` and that API; it appears in page source, so never reuse a key with other APIs enabled |
 | `ALERT_EMAIL` | where the weekly X engagement report goes (exe.dev only emails the VM owner) |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | @plaingov's OAuth 1.0a keys (read+write) |
 | `DRY_RUN` | `1` (default) prints posts instead of sending |
@@ -88,7 +89,7 @@ Only verified sponsor contacts appear on bill pages, without generic committee d
 
 ## Where to vote
 
-[plaingov.com/vote](https://plaingov.com/vote/) and every state page (also at short links like `/sc/`) link to the state's official where-to-vote lookup (`VOTE`, from [NASS's list](https://www.nass.org/can-I-vote/find-your-polling-place)). “Use my location” sends rounded coordinates from the browser to the Census geocoder to pick the state; PlainGov never sees them. Update `ELECTION` after each general election.
+[plaingov.com/vote](https://plaingov.com/vote/) and every state page (also at short links like `/sc/`) link to the state's official where-to-vote lookup (`VOTE`, from [NASS's list](https://www.nass.org/can-I-vote/find-your-polling-place)). With `CIVIC_API_KEY` set, those pages also look up the reader's polling place, early voting sites and ballot drop boxes in the browser: the address goes straight to Google's [Civic Information API](https://developers.google.com/civic-information) (data from the Voting Information Project), and “Use my location” first turns the location into an address with OpenStreetMap's Nominatim. PlainGov never sees either. Without a key, pages show only the official links. Update `ELECTION` after each general election.
 
 ## Sponsor links
 

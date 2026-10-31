@@ -1290,6 +1290,8 @@ table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;
 .fine{font-size:.8rem;color:var(--soft);margin-top:1.25rem}
 .vote{background:#fff;border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:.8rem 1rem;margin:1.25rem 0}
 .vote a{font-weight:700}
+.vote label{display:block}.vote input{font:inherit;width:100%;padding:.6rem .8rem;border:1px solid var(--line);border-radius:10px;margin:.6rem 0 0}
+button.alt{background:#fff;color:var(--accent);border:1px solid var(--accent)}
 button{font:inherit;font-weight:700;color:#fff;background:var(--accent);border:0;border-radius:10px;padding:.6rem 1.1rem;cursor:pointer}
 @media (max-width:32rem){.hero h1{font-size:1.9rem}h1{font-size:1.6rem}.top nav{gap:.8rem}.top nav a{font-size:.9rem}}
 @media (max-width:26rem){.top nav a[href="/about/"]{display:none}}
@@ -1516,8 +1518,9 @@ PRIVACY = """<h1>Privacy</h1>
 <p class=lede>Short version: we don't track you.</p>
 <p>No accounts, no ads, no cookies. We count visits with <a href="https://vercel.com/docs/analytics/privacy-policy">Vercel Web Analytics</a>,
 which doesn't use cookies or store personal info. It just tells us things like how many people visited and which pages they read.</p>
-<p>If you tap “Use my location” on our voting page, your browser sends your approximate location to the U.S. Census Bureau's
-<a href="https://geocoding.geo.census.gov">geocoder</a> to find your state. We never see or store it.</p>
+<p>When you look up where to vote, your browser sends the address you type to Google's
+<a href="https://developers.google.com/civic-information">Civic Information API</a>. If you tap “Use my location,” it first sends your
+location to <a href="https://nominatim.org">OpenStreetMap</a> to find your address. We never see or store either.</p>
 <p>If you email us, we'll only use your email to write back.</p>
 <p>Questions? Email <a href="mailto:hello@plaingov.com">hello@plaingov.com</a>.</p>
 <p class=meta>Last updated October 31, 2026.</p>"""
@@ -1580,25 +1583,6 @@ VOTE = {
     "WI": "https://myvote.wi.gov/en-us/FindMyPollingPlace",
     "WY": "https://myelectionday.sos.wyo.gov/WYVOTES/Pages/VOSearch.aspx",
 }
-# Location -> state via the Census geocoder (JSONP: it sends no CORS headers); coordinates are rounded to ~100 m.
-LOCATE_JS = """const found = document.getElementById("found");
-const fail = () => found.textContent = "We couldn't tell where you are. Pick your state below.";
-document.getElementById("locate").onclick = () => {
-  found.textContent = "Finding your state…";
-  if (!navigator.geolocation) return fail();
-  navigator.geolocation.getCurrentPosition(p => {
-    window.foundState = r => {
-      const st = (r.result.geographies.States[0] || {}).STUSAB, a = document.getElementById("vote-" + st);
-      if (!a) return fail();
-      found.replaceChildren("You're in " + a.dataset.name + ". ", Object.assign(document.createElement("a"), {href: a.href, textContent: "Find where to vote →"}));
-    };
-    const s = document.createElement("script");
-    s.onerror = fail;
-    s.src = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates?benchmark=Public_AR_Current&vintage=Current_Current&layers=States&format=jsonp&callback=foundState"
-      + "&x=" + p.coords.longitude.toFixed(3) + "&y=" + p.coords.latitude.toFixed(3);
-    document.head.append(s);
-  }, fail, {timeout: 15000, maximumAge: 600000});
-};"""
 
 
 def election_day():
@@ -1606,19 +1590,33 @@ def election_day():
     return f"Election Day is {date(ELECTION, '%A, %B %-d')}. " if time.strftime("%Y-%m-%d") <= ELECTION else ""
 
 
+def vote_form():
+    """Address or location -> polling place, early voting and drop boxes, looked up in the browser (static/vote.js)."""
+    key = os.environ.get("CIVIC_API_KEY")  # browser key: Google limits it to plaingov.com and the Civic Information API
+    return key and (f'<form id=where class=vote data-key="{e(key)}"><label for=address><strong>{election_day()}Find your polling place.</strong> '
+                    "It depends on your home address.</label>"
+                    '<input id=address name=address autocomplete=street-address required placeholder="123 Main St, Greenville, SC">'
+                    '<p><button>Find where I vote</button> <button id=locate type=button class=alt>Use my location</button></p>'
+                    "<span class=meta>Your address goes straight from your browser to Google's Civic Information API (location: © OpenStreetMap). "
+                    "PlainGov never sees it.</span></form><div id=result role=status aria-live=polite></div><script src=/vote.js defer></script>")
+
+
 def vote_box(st):
     host = urllib.parse.urlparse(VOTE[st]).netloc.removeprefix("www.")
-    return (f'<p class=vote>{election_day()}<a href="{e(VOTE[st])}">Find where to vote in {STATES[st]} →</a>'
+    official = f'<a id="vote-{st}" href="{e(VOTE[st])}">'
+    if form := vote_form():
+        return form + f"<p class=meta>Or use {official}{STATES[st]}'s official lookup</a> on {e(host)}.</p>"
+    return (f'<p class=vote>{election_day()}{official}Find where to vote in {STATES[st]} →</a>'
             f'<span class=meta>{STATES[st]}\'s official lookup on {e(host)}. Federal, state and local races share one ballot.</span></p>')
 
 
 def vote_body():
-    grid = "".join(f'<li><a id="vote-{st}" data-name="{n}" href="{e(VOTE[st])}">{n}<span class=meta>{e(urllib.parse.urlparse(VOTE[st]).netloc.removeprefix("www."))}</span></a></li>'
+    grid = "".join(f'<li><a id="vote-{st}" href="{e(VOTE[st])}">{n}<span class=meta>{e(urllib.parse.urlparse(VOTE[st]).netloc.removeprefix("www."))}</span></a></li>'
                    for st, n in sorted(STATES.items(), key=lambda kv: kv[1]))
-    return (f"<h1>Where do I vote?</h1><p class=lede>{election_day()}Congress, state and local races are all on one ballot, "
-            "so you vote for all of them in the same place. Your state's official lookup shows where and how to vote.</p>"
-            '<p><button id=locate type=button>Use my location</button></p><p id=found class=vote role=status aria-live=polite>Or pick your state below.</p>'
-            f"<ul class=grid>{grid}</ul><script>{LOCATE_JS}</script>")
+    form = vote_form()
+    return (f"<h1>Where do I vote?</h1><p class=lede>{'' if form else election_day()}Congress, state and local races are all on one ballot, "
+            f"so you vote for all of them in the same place.</p>{form}"
+            f"<h2>{'Or use' if form else 'Pick'} your state's official lookup</h2><ul class=grid>{grid}</ul>")
 
 
 def build_site():
