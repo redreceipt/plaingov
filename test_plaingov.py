@@ -478,6 +478,15 @@ try:
         posted = json.load(open(f"{plaingov.DATA}/state/posts.json"))[-1]
         assert posted["stage"] == published_stage["short"] and posted["milestone"] == milestone and posted["link"] == linked
         assert posted["where"] == "federal" and not posted["question"] and ("https://plaingov.com/" in posted["text"]) == linked
+    # Title-only bills and ordinary introduced bills aren't news; votes, laws and vetoes need only MIN_INTEREST.
+    for fields, interest, posts in (({"limited": True, "milestone": True}, 4, False), ({"milestone": False}, 2.9, False),
+                                    ({"milestone": False}, 3, True), ({"milestone": True}, plaingov.MIN_INTEREST, True)):
+        plaingov.write(path, json.dumps({**rec, **fields}))
+        plaingov.write(f"{plaingov.DATA}/state/posts.json", "[]")
+        plaingov.write(f"{plaingov.DATA}/state/queue.json", json.dumps([{"id": rec['id'], "at": now, "interest": interest}]))
+        plaingov.post_best()
+        assert bool(json.load(open(f"{plaingov.DATA}/state/posts.json"))) == posts, (fields, interest)
+        assert len(json.load(open(f"{plaingov.DATA}/state/queue.json"))) == (not posts), "skipped items wait out their day in the queue"
     plaingov.write(path, json.dumps({**rec, "stage": us_stage("Public Law")}))
     plaingov.write(f"{plaingov.DATA}/state/posts.json", json.dumps([posted, {"at": now, "id": rec['id'], "tweet": "legacy"}]))
     plaingov.write(f"{plaingov.DATA}/state/x.json", '{"id":"self"}')
