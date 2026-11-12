@@ -962,6 +962,7 @@ def scrape(only=None):
         if time.time() - pulled > 86400:
             for image in (SCRAPER_IMAGE, CA_IMAGE):
                 subprocess.run(["docker", "pull", "-q", image], capture_output=True)
+            subprocess.run(["docker", "image", "prune", "-f"], capture_output=True)  # each pull strands the old ~2-3 GB image; 16 of them filled the disk
             pulled = time.time()
         for st, f in list(running.items()):
             if f.done():
