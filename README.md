@@ -91,6 +91,10 @@ Only verified sponsor contacts appear on bill pages, without generic committee d
 
 [plaingov.com/vote](https://plaingov.com/vote/) and every state page (also at short links like `/sc/`) link to the state's official where-to-vote lookup (`VOTE`, from [NASS's list](https://www.nass.org/can-I-vote/find-your-polling-place)). With `CIVIC_API_KEY` set, those pages also look up the reader's polling place, early voting sites and ballot drop boxes in the browser (a ZIP code or town shows just the area's early voting and drop boxes): the address goes straight to Google's [Civic Information API](https://developers.google.com/civic-information) (data from the Voting Information Project), and to OpenStreetMap's Nominatim, which places it on a map (or turns “Use my location” into an address) to list the nearest sites first. PlainGov never sees any of it. Without a key, pages show only the official links. Update `ELECTION` after each general election.
 
+## New laws starting soon
+
+[plaingov.com/new-laws](https://plaingov.com/new-laws/) and a page per state (`/states/ca/new-laws/`) list signed laws that start in the next year, by start date. A law appears only when its `effective` field is one exact date; staggered or conditional starts stay on the bill's own page.
+
 ## Sponsor links
 
 Congress ingestion preserves sponsor Bioguide IDs. Site rebuilds match them against the [House Clerk](https://clerk.house.gov/xml/lists/MemberData.xml) and [Senate](https://www.senate.gov/general/contact_information/senators_cfm.xml) current-member rosters. Verified matches link the sponsor’s name to an official profile/contact page. Senators link to Senate.gov's state contact directory, which lists both senators and their office details; individual senator sites blocked automated verification. The sponsor may not represent the reader.
