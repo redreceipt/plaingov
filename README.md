@@ -41,7 +41,7 @@ python3 test_sponsors.py       # identity joins, transport, cache and enrichment
 python3 test_state_feeds.py    # keyed feeds, cutover and bill documents
 ```
 
-A feed's first run builds pages for what's already listed and queues no posts. Milestone posts link to the bill's page; other posts don't (X charges far more for posts with links). Posts go out 8am–9pm Eastern, spread evenly, since a new post's first hours decide its reach on X. Data and the generated site live in `~/plaingov-data`; `plaingov-web.service` serves it, and a Vercel project in front of plaingov.com proxies to it for Vercel Analytics.
+A feed's first run builds pages for what's already listed and queues no posts. Milestone posts link to the bill's page; other posts don't (X charges far more for posts with links). Bills we know only by title are never posted, and a newly introduced bill is posted only at interest 3 or higher. When 3 or more of a state's laws start on the same day within 45 days, one roundup a day links that state's new-laws page. Posts go out 8am–9pm Eastern, spread evenly, since a new post's first hours decide its reach on X. Data and the generated site live in `~/plaingov-data`; `plaingov-web.service` serves it, and a Vercel project in front of plaingov.com proxies to it for Vercel Analytics.
 
 AI calls go through exe.dev integrations, so no AI keys live on the VM: `llm.int.exe.xyz` (Claude) and `opencode.int.exe.xyz` (jev via OpenCode Zen).
 

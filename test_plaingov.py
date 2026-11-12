@@ -487,6 +487,26 @@ try:
         plaingov.post_best()
         assert bool(json.load(open(f"{plaingov.DATA}/state/posts.json"))) == posts, (fields, interest)
         assert len(json.load(open(f"{plaingov.DATA}/state/queue.json"))) == (not posts), "skipped items wait out their day in the queue"
+    # With 3+ state laws starting the same day soon, one roundup goes out a day, once per state and start date.
+    soon = time.strftime("%B %d, %Y", time.gmtime(now + 10 * 86400))
+    for n in range(3):
+        plaingov.write(f"{plaingov.DATA}/bills/states/sc/{n}.json", json.dumps({**rec, "id": f"states/sc/{n}", "state": "SC", "stage": us_stage("Public Law"),
+                       "effective": soon, "interest": n, "headline": f"Law {n} " + "é" * 60}))
+    plaingov.write(f"{plaingov.DATA}/state/queue.json", "[]")
+    plaingov.write(f"{plaingov.DATA}/state/posts.json", "[]")
+    plaingov.post_best()
+    sent = json.load(open(f"{plaingov.DATA}/state/posts.json"))
+    assert len(sent) == 1 and sent[0]["id"].startswith("states/sc/new-laws#") and sent[0]["stage"] == "New laws" and sent[0]["link"], sent
+    text = sent[0]["text"]
+    assert text.startswith("South Carolina: 3 new laws start ") and text.endswith("\n\nhttps://plaingov.com/states/sc/new-laws/"), text
+    assert text.index("Law 2") < text.index("Law 1") and "Law 0" not in text and len(text) - len("https://plaingov.com/states/sc/new-laws/") + 23 <= 280, text
+    for later in (0, 2 * 86400):  # not twice in a day, and never again for the same state and date
+        plaingov.time.time = lambda: now + later
+        plaingov.post_best()
+        assert len(json.load(open(f"{plaingov.DATA}/state/posts.json"))) == 1
+    plaingov.time.time = lambda: now
+    for n in range(3):
+        os.remove(f"{plaingov.DATA}/bills/states/sc/{n}.json")
     plaingov.write(path, json.dumps({**rec, "stage": us_stage("Public Law")}))
     plaingov.write(f"{plaingov.DATA}/state/posts.json", json.dumps([posted, {"at": now, "id": rec['id'], "tweet": "legacy"}]))
     plaingov.write(f"{plaingov.DATA}/state/x.json", '{"id":"self"}')
