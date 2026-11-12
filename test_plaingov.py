@@ -586,6 +586,20 @@ with tempfile.TemporaryDirectory() as plaingov.DATA:
     assert f'href="{plaingov.e(plaingov.VOTE["SC"])}">Find where to vote in South Carolina' in sc
     vote = open(f"{plaingov.DATA}/site/vote/index.html").read()
     assert vote.count("<li><a id=\"vote-") == 50 and "id=where" not in vote and "/vote/" in open(f"{plaingov.DATA}/site/us/index.html").read()
+    # Signed laws with one exact, upcoming start date get new-laws pages; staggered, past, far-off and unsigned ones don't.
+    assert not os.path.exists(f"{plaingov.DATA}/site/states/sc/new-laws") and "Nothing with a set start date" in open(f"{plaingov.DATA}/site/new-laws/index.html").read()
+    year = time.gmtime().tm_year + 1
+    law = {**rec, "state": "SC", "where": "South Carolina", "stage": us_stage("Public Law"), "milestone": True}
+    for n, (effective, extra) in enumerate(((f"January 1, {year}", {}), (f"January 1, {year}", {"headline": "Second law"}), (f"July 1, {year}; some rules later", {}),
+                                            ("January 1, 2020", {}), ("January 1, 3000", {}), (f"January 1, {year}", {"stage": us_stage("Passed House")}))):
+        plaingov.write(f"{plaingov.DATA}/bills/states/sc/{n}.json", json.dumps({**law, "id": f"states/sc/{n}", "effective": effective, **extra}))
+    plaingov.build_site()
+    new = open(f"{plaingov.DATA}/site/states/sc/new-laws/index.html").read()
+    assert f"<title>New South Carolina laws starting January 1, {year} · PlainGov</title>" in new and f"<h2>Starting January 1, {year}</h2>" in new
+    assert new.count("<li>") == 2 and "Second law" in new and "2 new South Carolina laws start in the next year" in new
+    for path in ("", "states/sc/", "new-laws/"):
+        assert ("2 new laws starting soon →" in open(f"{plaingov.DATA}/site/{path}index.html").read()) == (path != "new-laws/"), path
+    assert "states/sc/new-laws/</loc>" in open(f"{plaingov.DATA}/site/sitemap.xml").read() and not os.path.exists(f"{plaingov.DATA}/site/states/ga/new-laws")
     # With a Civic API key, the lookup form appears on /vote/ and state pages; the official link stays as the fallback.
     os.environ["CIVIC_API_KEY"] = 'k"ey'
     try:
