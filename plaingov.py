@@ -1982,27 +1982,53 @@ def post_best():
     news = lambda q: q["interest"] is not None and not recs[q["id"]].get("limited") and q["interest"] >= (MIN_INTEREST if recs[q["id"]].get("milestone") else 3)
     best = max(filter(news, queue), key=lambda q: q["interest"], default=None)
     gap = (POST_HOURS[1] - POST_HOURS[0]) * 3600 / MAX_POSTS_PER_DAY
-    if not best:
-        why = "nothing interesting enough"
-    elif not posting_hours(now):
+    if not posting_hours(now):
         why = f"outside posting hours ({POST_HOURS[0]}:00-{POST_HOURS[1]}:00 Eastern)"
     elif len(recent) >= MAX_POSTS_PER_DAY or (recent and now - recent[-1]["at"] < gap - 300):
         why = "waiting to spread posts out"
+    elif not (pick := roundup(log, now) or best):
+        why = "nothing interesting enough"
     else:
-        rec = recs[best["id"]]
-        n, testing = len(log), time.strftime("%Y-%m-%d") < EXPERIMENTS_UNTIL
-        link = rec["milestone"] and (not testing or n % 2 == 0)
-        text = tweet_text(rec, link=link)
+        if pick is best:
+            rec = recs[best["id"]]
+            n, testing = len(log), time.strftime("%Y-%m-%d") < EXPERIMENTS_UNTIL
+            link = rec["milestone"] and (not testing or n % 2 == 0)
+            pid, text, note = best["id"], tweet_text(rec, link=link), f"interest {best['interest']}"
+            entry = {"stage": rec["stage"]["short"], "where": "state" if rec.get("state") else "federal", "milestone": rec["milestone"], "link": link}
+            queue = [q for q in queue if q["id"] != pid]
+        else:
+            (pid, text), note = pick, "roundup"
+            entry = {"stage": "New laws", "where": "state", "milestone": False, "link": True}
         tid = "dry-run" if DRY_RUN else post_x(text)["data"]["id"]
-        print(f"--- {'DRY RUN ' if DRY_RUN else ''}post {best['id']} (interest {best['interest']})\n{text}", flush=True)
-        log.append({"at": now, "id": best["id"], "tweet": tid, "text": text, "stage": rec["stage"]["short"],
-                    "where": "state" if rec.get("state") else "federal", "milestone": rec["milestone"], "link": link,
-                    "question": "Would this affect you?" in text})
+        print(f"--- {'DRY RUN ' if DRY_RUN else ''}post {pid} ({note})\n{text}", flush=True)
+        log.append({"at": now, "id": pid, "tweet": tid, "text": text, **entry, "question": "Would this affect you?" in text})
         write(lpath, json.dumps(log[-500:]))
-        queue = [q for q in queue if q["id"] != best["id"]]
         why = "posted"
     write(qpath, json.dumps(queue))
     print(f"post: {why}; {len(queue)} queued, {len(recent)} posted in the last day")
+
+
+def roundup(log, now):
+    """(post id, text) for one state's new laws starting soon, or None. At most one a day, once per state and start date:
+    3+ laws starting the same day within 45 days, soonest first. Laws about to start are news even when nothing passed."""
+    if any("/new-laws#" in p["id"] and now - p["at"] < 86400 for p in log):
+        return None
+    recs = [json.load(open(p)) for p in glob.glob(f"{DATA}/bills/states/**/*.json", recursive=True)]
+    posted, limit = {p["id"] for p in log}, time.strftime("%Y-%m-%d", time.gmtime(now + 45 * 86400))
+    groups = [(d, -len(laws), st, laws) for st in STATES for d, laws in new_laws([r for r in recs if r["state"] == st]).items()
+              if d <= limit and len(laws) >= 3 and f"states/{st.lower()}/new-laws#{d}" not in posted]
+    if not groups:
+        return None
+    d, _, st, laws = min(groups, key=lambda g: g[:3])
+    with ThreadPoolExecutor(6) as pool:  # laws found by catchup or a feed's first run were never scored
+        list(pool.map(score, [r for r in laws if r.get("interest") is None]))
+    text = f"{STATES[st]}: {len(laws)} new laws start {date(d, '%B %-d')}, including:\n"
+    for r in sorted(laws, key=lambda r: -(r.get("interest") or 0)):
+        line = "\n" + r["headline"]
+        if len(text + line) + sum(ord(c) > 4351 for c in text + line) + 2 + URL_LEN > 280:  # X counts most characters past U+10FF as 2
+            break
+        text += line
+    return f"states/{st.lower()}/new-laws#{d}", f"{text}\n\n{SITE_URL}/states/{st.lower()}/new-laws/"
 
 
 @contextlib.contextmanager

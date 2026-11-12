@@ -30,6 +30,12 @@ Findings for #6 and #7, October 2026. Sources: X's published For You ranker ([xa
 
 Lead with who is affected and the concrete change, preserving conditions and proposal/law status. No manufactured discussion questions, reaction prompts, or invented tradeoffs. The link experiment (#12) continues through November 7; #13 tracks the separate image trial. Historical question posts remain in reports so results are not relabeled.
 
+## November 2026 review
+
+Through November 1, 18 of 23 posts were newly introduced federal bills, 9 of the last 14 were known only by title, and sampled posts had 0–3 impressions. Posts now favor things that happened: votes, laws and vetoes at `MIN_INTEREST`, introduced bills only at interest 3+, never title-only bills, plus one daily roundup of a state's laws about to start. No winner is claimed; compare in the weekly report.
+
+X's [Original Content Rewards](https://help.x.com/en/using-x/original-content-rewards) page (read November 11, 2026) lists content "created or posted using automated means" as ineligible and requires 500 verified followers, so this feed cannot earn payouts (#42).
+
 ## Report limits
 
 New posts retain their publication-time stage, milestone eligibility, link/question treatment and exact copy. Reports use that snapshot, not the bill's current stage. Older posts without a snapshot have unknown stage/eligibility; they stay in historical totals but are excluded from link groups. Link groups include only known milestone-eligible posts.
