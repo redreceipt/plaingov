@@ -1323,7 +1323,7 @@ def page(title, desc, body, path=""):
 <nav aria-label="Main"><a href="/vote/">Vote</a><a href="/us/">Congress</a><a href="/states/">States</a><a href="/about/">About</a></nav></div></header>
 <main id="main" class="wrap">{body}</main>
 <footer class="site-foot wrap"><div class="foot"><div><a class="brand" href="/">{brand}</a><p>Government, in plain English. Free and nonpartisan.</p></div>
-<nav aria-label="Footer"><a href="/vote/">Where to vote</a><a href="/us/">Congress</a><a href="/states/">States</a><a href="/about/">About</a><a href="/status/">Data status</a>
+<nav aria-label="Footer"><a href="/vote/">Where to vote</a><a href="/us/">Congress</a><a href="/states/">States</a><a href="/new-laws/">New laws</a><a href="/about/">About</a><a href="/status/">Data status</a>
 <a href="/privacy/">Privacy</a><a href="https://x.com/plaingov">Follow us on X</a><a href="mailto:hello@plaingov.com">Contact</a></nav></div>
 <p class="fine">We use AI to turn official bill text into plain English. It can miss things, so check the official link on each page before you rely on it. This isn't legal advice. © {time.strftime('%Y')} PlainGov.</p></footer>
 </body></html>
@@ -1360,6 +1360,36 @@ def by_stage(recs, where):
         if hit:
             out += f"<h2>{name}</h2>" + items(newest(hit, 25), where)
     return out or "<p>Nothing new here yet. We check every day, so come back soon.</p>"
+
+
+def starts(r):
+    """ISO date a law starts, if `effective` is exactly one date ("January 1, 2027"); staggered or conditional starts don't count."""
+    try:
+        return time.strftime("%Y-%m-%d", time.strptime(r.get("effective") or "", "%B %d, %Y"))
+    except ValueError:
+        return ""
+
+
+def new_laws(recs):
+    """Signed laws that start in the next year, as {start date: laws}, soonest first."""
+    day = lambda offset: time.strftime("%Y-%m-%d", time.gmtime(time.time() + offset * 86400))
+    out = {}
+    for r in sorted(recs, key=starts):
+        if r["stage"]["step"] == 3 and not (r.get("resolution") or r.get("amendment") or r.get("limited")) and day(0) <= starts(r) <= day(365):
+            out.setdefault(starts(r), []).append(r)
+    return out
+
+
+def new_laws_page(soon, name="", back=""):
+    """(title, description, body) listing new_laws() for one state (`name`, with a `back` link) or the whole country."""
+    count, long = sum(map(len, soon.values())), lambda d: date(d, "%B %-d, %Y")
+    top = max(soon, key=lambda d: len(soon[d]), default="")  # the date most people will search for, usually January 1 or July 1
+    name += " " if name else ""
+    return (f"New {name}laws starting {long(top) or 'soon'} · PlainGov",
+            f"{count} new {name}law{'s' * (count != 1)} start in the next year{f', {len(soon[top])} on {long(top)}' if top else ''}. Each one explained in plain English.",
+            f"{back}<h1>New {name}laws starting soon</h1><p class=lede>Signed laws that start in the next year, soonest first. "
+            "We list a law here only when it has one set start date.</p>"
+            + ("".join(f"<h2>Starting {long(d)}</h2>" + items(rs, not back) for d, rs in soon.items()) or "<p>Nothing with a set start date right now. We check every day.</p>"))
 
 
 def house_members():
@@ -1634,10 +1664,13 @@ def build_site():
     states = [r for r in recs if r.get("state")]
     week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
     top = sorted((r for r in recs if r["date"] >= week), key=lambda r: r.get("interest") or 0, reverse=True)[:6]
+    soon = new_laws(recs)
+    count = sum(map(len, soon.values()))
     home = f"""<section class=hero><h1>What's going on in government, in plain English.</h1>
 <p class=lede>New bills and laws from Congress and all 50 states, explained like a friend would. No jargon, no spin.</p>
 <p class=vote>{election_day()}<a href="/vote/">Find where to vote →</a></p></section>
 {'<h2>Biggest stories this week</h2>' + items(top) if top else ''}
+{f'<a class=more href="/new-laws/">{count} new law{"s" * (count != 1)} starting soon →</a>' if count else ''}
 <h2>Latest from Congress</h2>{items(newest([r for r in us if r not in top], 6), False)}<a class=more href="/us/">See everything from Congress →</a>
 <h2>Latest from the states</h2>{items(newest([r for r in states if r not in top], 8))}<a class=more href="/states/">Pick your state →</a>"""
     pages = {
@@ -1645,6 +1678,7 @@ def build_site():
         "us/": ("Congress · PlainGov", "What Congress is up to, in plain English.",
                 "<h1>Congress</h1><p class=lede>What the U.S. House and Senate are working on, newest first.</p>"
                 f'<p class=vote>{election_day()}Voting for Congress? <a href="/vote/">Find where to vote →</a></p>' + by_stage(us, False)),
+        "new-laws/": new_laws_page(soon),
         "vote/": ("Where do I vote? · PlainGov", "Find where to vote for Congress, state and local races, with your state's official lookup.", vote_body()),
         "about/": ("About · PlainGov", "What PlainGov is, where our info comes from, and how we use AI.", ABOUT),
         "privacy/": ("Privacy · PlainGov", "We don't track you. Here's the short version.", PRIVACY),
@@ -1656,9 +1690,14 @@ def build_site():
     pages["states/"] = ("Pick your state · PlainGov", "What lawmakers in all 50 states are voting on, in plain English.",
                         f"<h1>Pick your state</h1><p class=lede>See what lawmakers in your state have been voting on.</p><ul class=grid>{grid}</ul>")
     for st, n in STATES.items():
+        mine, more = [r for r in states if r["state"] == st], ""
+        if soon_here := new_laws(mine):
+            pages[f"states/{st.lower()}/new-laws/"] = new_laws_page(soon_here, n, f'<p class=eyebrow><a href="/states/{st.lower()}/">{n}</a></p>')
+            k = sum(map(len, soon_here.values()))
+            more = f'<p><a class=more href="/states/{st.lower()}/new-laws/">{k} new law{"s" * (k != 1)} starting soon →</a></p>'
         pages[f"states/{st.lower()}/"] = (f"{n} · PlainGov", f"What {n} lawmakers are voting on, in plain English.",
             f"<p class=eyebrow><a href=\"/states/\">All states</a></p><h1>{n}</h1><p class=lede>What {n} lawmakers have been voting on lately.</p>"
-            + vote_box(st) + by_stage([r for r in states if r["state"] == st], False))
+            + vote_box(st) + more + by_stage(mine, False))
     for path, (title, desc, body) in pages.items():
         write(f"{site}/{path}index.html", page(title, desc, body, path))
         if path.startswith("states/") and len(path) == 10:  # short link: /sc/ is /states/sc/
