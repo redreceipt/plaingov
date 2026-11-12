@@ -1934,19 +1934,23 @@ def post_best():
     queue = [q for q in load(qpath, []) if now - q["at"] < 86400]  # day-old news isn't news
     log = load(lpath, [])
     recent = [p for p in log if now - p["at"] < 86400]
+    recs = {q["id"]: load(f"{DATA}/bills/{q['id']}.json", None) or {} for q in queue}
     for q in queue:  # scores that failed earlier (e.g. jev's free limit) get another try
         if q["interest"] is None:
-            q["interest"] = score(load(f"{DATA}/bills/{q['id']}.json", None) or {})
-    best = max((q for q in queue if q["interest"] is not None), key=lambda q: q["interest"], default=None)
+            q["interest"] = score(recs[q["id"]])
+    # Never post a bill we only know by its title. Most introduced bills never get a vote, so one is news only if it's
+    # big (3 = "affects many people's daily lives or money"); votes, laws and vetoes just need MIN_INTEREST.
+    news = lambda q: q["interest"] is not None and not recs[q["id"]].get("limited") and q["interest"] >= (MIN_INTEREST if recs[q["id"]].get("milestone") else 3)
+    best = max(filter(news, queue), key=lambda q: q["interest"], default=None)
     gap = (POST_HOURS[1] - POST_HOURS[0]) * 3600 / MAX_POSTS_PER_DAY
-    if not best or best["interest"] < MIN_INTEREST:
+    if not best:
         why = "nothing interesting enough"
     elif not posting_hours(now):
         why = f"outside posting hours ({POST_HOURS[0]}:00-{POST_HOURS[1]}:00 Eastern)"
     elif len(recent) >= MAX_POSTS_PER_DAY or (recent and now - recent[-1]["at"] < gap - 300):
         why = "waiting to spread posts out"
     else:
-        rec = load(f"{DATA}/bills/{best['id']}.json", None)
+        rec = recs[best["id"]]
         n, testing = len(log), time.strftime("%Y-%m-%d") < EXPERIMENTS_UNTIL
         link = rec["milestone"] and (not testing or n % 2 == 0)
         text = tweet_text(rec, link=link)
