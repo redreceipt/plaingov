@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PlainGov: what your government is doing, in plain English.
 
-Usage: plaingov.py congress   new Congress.gov bill summaries -> pages + post queue
+Usage: plaingov.py congress   House/Senate floor status, new Congress.gov bill summaries -> pages + post queue
        plaingov.py scrape     daemon: run each state legislature's scraper about daily -> pages + post queue + journal logs
        plaingov.py post       post the most interesting queued update to X (@plaingov)
        plaingov.py site       rebuild the site only
@@ -194,6 +194,34 @@ def congress_update(b):
         "actions": [f"{a['actionDate']}: {a['text']}"],
         "latest_action": {"date": a["actionDate"], "text": a["text"], "chamber": ""},
     }
+
+
+def house_week(page):
+    """[congress, week start, [[bill number, official title], ...]] from the House's bills-this-week XML linked on docs.house.gov/floor/."""
+    import xml.etree.ElementTree as ET
+    d = re.search(r"billsthisweek/(\d{8})/\1\.xml", page)[1]
+    root = ET.fromstring(fetch(f"https://docs.house.gov/floor/Download.aspx?file=/billsthisweek/{d}/{d}.xml", timeout=30).lstrip("\ufeff"))
+    return [root.get("congress-num"), datetime.date.fromisoformat(root.get("week-date")).isoformat(), [[(i.findtext("legis-num") or "").strip(), (i.findtext("floor-text") or "").strip()]
+                                                             for i in root.iter("floor-item") if not i.get("remove-date")]]
+
+
+def floor():
+    """Each chamber's own word on whether it's meeting, and what the House may vote on this week, for the Congress page.
+    Hourly with the congress job; a source that's down is left out until the next run."""
+    out = {"at": time.time()}
+    br = lambda s: strip(re.sub(r"<br\s*/?>", ": ", s)).replace(" :", ":")
+    sources = {
+        "house": ("https://clerk.house.gov/", lambda p: [strip(re.search(f'id="menu-session-{k}"[^>]*>(.*?)</h', p, re.S)[1]) for k in ("status", "status-date")]),
+        "senate": ("https://www.senate.gov/legislative/schedule/floor_schedule.htm",
+                   lambda p: [f"{br(h)}: {br(s)}" for h, s in re.findall(r'(?s)<h3>(.*?)</h3>\s*<span class="floor-schedule">(.*?)</span>', p)]),
+        "week": ("https://docs.house.gov/floor/", house_week),
+    }
+    for k, (url, parse) in sources.items():
+        try:
+            out[k] = parse(fetch(url, timeout=30))
+        except Exception as ex:
+            print(f"floor {k}: {ex!r}", file=sys.stderr, flush=True)
+    write(f"{DATA}/state/floor.json", json.dumps(out))
 
 
 # --- States: each legislature's own website, via Open States' open-source scrapers ---------
@@ -769,6 +797,21 @@ def save_ids(st, ai={}):
           "bills": {bill_num(i, st): [s, i, n] for s, i, n, _ in rows if s == main}}))
 
 
+def activity(files):
+    """How many bills had official action in the last week, in all and by kind, and the latest vote, from a good scrape."""
+    today, since = (time.strftime("%Y-%m-%d", time.gmtime(time.time() - d * 86400)) for d in (0, 7))
+    kinds = {"new": {"introduction"}, "passed a vote": {"passage"}, "became law": LAW, "vetoed": {"executive-veto"}}
+    out = {"as_of": today, "last_vote": "", "moved": 0, **dict.fromkeys(kinds, 0)}
+    for f in files:
+        acts = [a for a in json.load(open(f))["actions"] if a["date"][:10] <= today]  # some states list effective dates as actions
+        out["last_vote"] = max([out["last_vote"], *(a["date"][:10] for a in acts if {"passage", "failure"} & set(a["classification"]))])
+        week = {c for a in acts if a["date"][:10] >= since for c in a["classification"] or ["other"]}
+        out["moved"] += bool(week)
+        for k, match in kinds.items():
+            out[k] += bool(week & match)
+    return out
+
+
 def legiscan_items(st, known=None):
     """Milestones from LegiScan's bill list for a state: 2 passed one chamber, 3 passed both, 4 law, 5 vetoed.
     As a backup for a broken scraper, `known` (save_ids) maps them onto the scraper's bill IDs and post keys, so a bill
@@ -923,7 +966,8 @@ def scrape_state(st):
                 write(path, json.dumps(sorted(seen)))
         new, done, failed = process(f"states-{st.lower()}", state_items(st, ai), state_update)
         save_ids(st, ai)
-        stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed, "backup": "", "source": "legislature"}
+        stats = {"last_ok": time.time(), "bills": bills, "sessions": sessions, "milestones": new, "page_failures": failed, "backup": "", "source": "legislature",
+                 "activity": activity(files)}
     h = set_health(st, status=status, error=error[-800:], last_end=time.time(), site=site, **stats)
     if status == "failed" and prev.get("status") != "failed":
         up = site_status(site)
@@ -1392,6 +1436,36 @@ def new_laws_page(soon, name="", back=""):
             + ("".join(f"<h2>Starting {long(d)}</h2>" + items(rs, not back) for d, rs in soon.items()) or "<p>Nothing with a set start date right now. We check every day.</p>"))
 
 
+def floor_body(f, recs):
+    """'Right now' on the Congress page, from floor() if it ran in the last 6 hours: an old "In Session" would mislead."""
+    if time.time() - f.get("at", 0) > 6 * 3600:
+        return ""
+    out = "".join(f"<p><strong>{ch.title()}:</strong> {e(' · '.join(f[ch]).removeprefix('House '))}</p>" for ch in ("house", "senate") if f.get(ch))
+    congress, start, bills = f.get("week") or (0, "", [])
+    today, codes, ours = time.strftime("%Y-%m-%d"), {label: t.lower() for t, (label, _) in TYPES.items()}, {r["id"]: r for r in recs}
+    if bills and today <= (datetime.date.fromisoformat(start) + datetime.timedelta(4)).isoformat():  # the House's week ends Friday
+        page = lambda num: ours.get(f"us/{congress}-{codes.get(m[1])}-{m[2]}") if (m := re.fullmatch(r"(\S+) (\d+)", num)) else None
+        out += (f"<p>{'This week' if start <= today else 'The week of ' + date(start, '%B %-d')}, the House may vote on:</p><ul class=list>"
+                + "".join(item(r, False) if (r := page(num)) else f"<li>{e(title)}<span class=meta>{e(num)}</span></li>" for num, title in bills) + "</ul>")
+    checked = datetime.datetime.fromtimestamp(f["at"], zoneinfo.ZoneInfo("America/New_York")).strftime("%b %-d, %-I:%M %p ET")
+    return out and ("<h2>Right now</h2>" + out + '<p class=meta>Watch live: <a href="https://live.house.gov/">House</a> · '
+                    '<a href="https://www.senate.gov/legislative/floor_activity_pail.htm">Senate</a>. From <a href="https://clerk.house.gov/">clerk.house.gov</a>, '
+                    f'<a href="https://www.senate.gov/legislative/schedule/floor_schedule.htm">senate.gov</a> and <a href="https://docs.house.gov/floor/">docs.house.gov</a> at {checked}.</p>')
+
+
+def activity_body(h):
+    """'Right now' on a state page: its last week of official actions, from activity() at its last good scrape."""
+    if not (a := h.get("activity")):
+        return ""
+    parts = ", ".join(f"{a[k]} {k}" for k in ("new", "passed a vote", "became law", "vetoed") if a[k])
+    text = (f"In the week up to {date(a['as_of'])}, {a['moved']} bill{'s' * (a['moved'] != 1)} had official action{': ' * bool(parts)}{parts}." if a["moved"]
+            else f"No bill had official action in the week up to {date(a['as_of'])}.")
+    text += f" Lawmakers last voted on {date(a['last_vote'], '%A, %B %-d, %Y')}." if a["last_vote"] else ""
+    site = h.get("site") or ""
+    return (f"<h2>Right now</h2><p>{text}</p>" + (f'<p class=meta>From official bill histories on <a href="{e(site)}">'
+            f'{e(urllib.parse.urlparse(site).netloc.removeprefix("www."))}</a>.</p>' if site.startswith(("https://", "http://")) else ""))
+
+
 def house_members():
     """Verify current House membership from the Clerk, not names or historical predecessor IDs."""
     import xml.etree.ElementTree as ET
@@ -1664,7 +1738,7 @@ def build_site():
     states = [r for r in recs if r.get("state")]
     week = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
     top = sorted((r for r in recs if r["date"] >= week), key=lambda r: r.get("interest") or 0, reverse=True)[:6]
-    soon = new_laws(recs)
+    soon, health = new_laws(recs), load(HEALTH, {})
     count = sum(map(len, soon.values()))
     home = f"""<section class=hero><h1>What's going on in government, in plain English.</h1>
 <p class=lede>New bills and laws from Congress and all 50 states, explained like a friend would. No jargon, no spin.</p>
@@ -1677,12 +1751,13 @@ def build_site():
         "": ("PlainGov: Government, in plain English", "New bills and laws from Congress and all 50 states, explained like a friend would.", home),
         "us/": ("Congress · PlainGov", "What Congress is up to, in plain English.",
                 "<h1>Congress</h1><p class=lede>What the U.S. House and Senate are working on, newest first.</p>"
-                f'<p class=vote>{election_day()}Voting for Congress? <a href="/vote/">Find where to vote →</a></p>' + by_stage(us, False)),
+                f'<p class=vote>{election_day()}Voting for Congress? <a href="/vote/">Find where to vote →</a></p>'
+                + floor_body(load(f"{DATA}/state/floor.json", {}), us) + by_stage(us, False)),
         "new-laws/": new_laws_page(soon),
         "vote/": ("Where do I vote? · PlainGov", "Find where to vote for Congress, state and local races, with your state's official lookup.", vote_body()),
         "about/": ("About · PlainGov", "What PlainGov is, where our info comes from, and how we use AI.", ABOUT),
         "privacy/": ("Privacy · PlainGov", "We don't track you. Here's the short version.", PRIVACY),
-        "status/": ("Data status · PlainGov", "How fresh our info is for each state.", status_body(load(HEALTH, {}))),
+        "status/": ("Data status · PlainGov", "How fresh our info is for each state.", status_body(health)),
     }
     counts = {st: sum(r["state"] == st for r in states) for st in STATES}
     grid = "".join(f"<li><a href=\"/states/{st.lower()}/\">{n}<span class=meta>{counts[st] or 'No'} recent update{'' if counts[st] == 1 else 's'}</span></a></li>"
@@ -1697,7 +1772,7 @@ def build_site():
             more = f'<p><a class=more href="/states/{st.lower()}/new-laws/">{k} new law{"s" * (k != 1)} starting soon →</a></p>'
         pages[f"states/{st.lower()}/"] = (f"{n} · PlainGov", f"What {n} lawmakers are voting on, in plain English.",
             f"<p class=eyebrow><a href=\"/states/\">All states</a></p><h1>{n}</h1><p class=lede>What {n} lawmakers have been voting on lately.</p>"
-            + vote_box(st) + more + by_stage(mine, False))
+            + vote_box(st) + more + activity_body(health.get(st, {})) + by_stage(mine, False))
     for path, (title, desc, body) in pages.items():
         write(f"{site}/{path}index.html", page(title, desc, body, path))
         if path.startswith("states/") and len(path) == 10:  # short link: /sc/ is /states/sc/
@@ -2093,5 +2168,6 @@ def process(feed, items, update):
 if __name__ == "__main__":
     cmd, arg = sys.argv[1], (sys.argv[2:] or [None])[0]
     if cmd == "congress":
+        floor()
         sys.exit(1 if process("congress", congress_items(), congress_update)[2] else 0)
     {"site": build_site, "restage": restage, "sponsors": lambda: enrich_sponsors(arg), "post": post, "scrape": lambda: scrape(arg), "serve": serve, "refresh": refresh, "catchup": catchup, "report": report}[cmd]()

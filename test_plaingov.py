@@ -630,4 +630,43 @@ with tempfile.TemporaryDirectory() as plaingov.DATA:
         html = open(f"{plaingov.DATA}/site/{path}/index.html").read()
         assert 'data-key="k&quot;ey"' in html and "src=/vote.js" in html and 'id="vote-SC"' in html, path
     assert os.path.exists(f"{plaingov.DATA}/site/vote.js")
+
+# "Right now": each chamber's own status and the House's agenda on /us/, and a state's last week of official actions on its page.
+with tempfile.TemporaryDirectory() as plaingov.DATA:
+    plaingov.HEALTH = f"{plaingov.DATA}/state/health.json"
+    day = lambda n: time.strftime("%Y-%m-%d", time.gmtime(time.time() + n * 86400))
+    pages = {"clerk.house.gov": '<h3 id="menu-session-status" class="x">House In Session</h3><h5 id="menu-session-status-date">Convened at 10:00 AM</h5>',
+             "senate.gov": '<h3>Previous Meeting</h3>\n<span class="floor-schedule"><strong>Thursday, Nov 12, 2026</strong>\n<br>The Senate convened at noon.</span>',
+             "20261109.xml": f'\ufeff<floorschedule congress-num="119" week-date="{day(0)}"><category><floor-items>'
+                             '<floor-item remove-date=""><legis-num>H.R. 3978 </legis-num><floor-text>Nuclear Act</floor-text></floor-item>'
+                             '<floor-item remove-date="2026-11-10"><legis-num>H.R. 1</legis-num><floor-text>Pulled</floor-text></floor-item>'
+                             '<floor-item remove-date=""><legis-num>S. 4618</legis-num><floor-text>Ours</floor-text></floor-item></floor-items></category></floorschedule>',
+             "floor/": 'href="Download.aspx?file=/billsthisweek/20261109/20261109.xml"'}  # after the XML, whose URL contains floor/
+    plaingov.fetch = lambda url, **k: next(v for key, v in pages.items() if key in url)
+    plaingov.floor()
+    pages.pop("senate.gov")  # a source that's down is left out, not fatal
+    with contextlib.redirect_stderr(io.StringIO()):
+        plaingov.floor()
+    assert "senate" not in json.load(open(f"{plaingov.DATA}/state/floor.json"))
+    pages["senate.gov"] = '<h3>Previous Meeting</h3>\n<span class="floor-schedule"><strong>Thursday, Nov 12, 2026</strong>\n<br>The Senate convened at noon.</span>'
+    plaingov.floor()
+    plaingov.fetch = original_fetch
+    plaingov.write(f"{plaingov.DATA}/bills/us/119-s-4618.json", json.dumps(rec))
+    os.makedirs(f"{plaingov.DATA}/scrape/sc/sc")
+    for i, acts in enumerate([[act(day(0), ["passage"], UP), act(day(30), ["became-law"], GOV)],  # future-dated actions don't count
+                              [act(day(-3), ["introduction"], LOW)], [act(day(-2), [], LOW)], [act(day(-40), ["passage"], LOW)]]):
+        json.dump({"actions": acts}, open(f"{plaingov.DATA}/scrape/sc/sc/bill_{i}.json", "w"))
+    a = plaingov.activity(plaingov.scraped("SC"))
+    assert (a["moved"], a["new"], a["passed a vote"], a["became law"], a["last_vote"]) == (3, 1, 1, 0, day(0)), a
+    plaingov.write(plaingov.HEALTH, json.dumps({"SC": {"activity": a, "site": "https://www.scstatehouse.gov/"}}))
+    plaingov.build_site()
+    us = open(f"{plaingov.DATA}/site/us/index.html").read()
+    assert "<strong>House:</strong> In Session · Convened at 10:00 AM" in us and "Previous Meeting: Thursday, Nov 12, 2026: The Senate convened at noon." in us, us
+    assert "This week, the House may vote on:" in us and "Nuclear Act<span class=meta>H.R. 3978" in us and "Pulled" not in us and 'href="/us/119-s-4618/"' in us
+    sc = open(f"{plaingov.DATA}/site/states/sc/index.html").read()
+    assert f"3 bills had official action: 1 new, 1 passed a vote. Lawmakers last voted on {plaingov.date(day(0), '%A, %B %-d, %Y')}." in sc, sc
+    assert ">scstatehouse.gov</a>" in sc and "Right now" not in open(f"{plaingov.DATA}/site/states/ga/index.html").read()
+    plaingov.write(f"{plaingov.DATA}/state/floor.json", json.dumps({**json.load(open(f"{plaingov.DATA}/state/floor.json")), "at": time.time() - 7 * 3600}))
+    plaingov.build_site()
+    assert "Right now" not in open(f"{plaingov.DATA}/site/us/index.html").read(), "a stale status would mislead"
 print("ok")
