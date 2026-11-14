@@ -25,7 +25,7 @@ The experience should make it simple to go from **what's happening** to **what i
 `plaingov.py` is one stdlib-only Python script, run hourly by systemd timers on an [exe.dev](https://exe.dev) VM:
 
 ```
-python3 plaingov.py congress   # new Congress.gov summaries -> pages + post queue
+python3 plaingov.py congress   # floor status + new Congress.gov summaries -> pages + post queue
 python3 plaingov.py scrape     # daemon: scrape every state ~daily -> pages + post queue + alerts
 python3 plaingov.py scrape SC  # scrape one state now
 python3 plaingov.py post       # post the most interesting queued update to @plaingov
@@ -90,6 +90,10 @@ Only verified sponsor contacts appear on bill pages, without generic committee d
 ## Where to vote
 
 [plaingov.com/vote](https://plaingov.com/vote/) and every state page (also at short links like `/sc/`) link to the state's official where-to-vote lookup (`VOTE`, from [NASS's list](https://www.nass.org/can-I-vote/find-your-polling-place)). With `CIVIC_API_KEY` set, those pages also look up the reader's polling place, early voting sites and ballot drop boxes in the browser (a ZIP code or town shows just the area's early voting and drop boxes): the address goes straight to Google's [Civic Information API](https://developers.google.com/civic-information) (data from the Voting Information Project), and to OpenStreetMap's Nominatim, which places it on a map (or turns “Use my location” into an address) to list the nearest sites first. PlainGov never sees any of it. Without a key, pages show only the official links. Update `ELECTION` after each general election.
+
+## Right now
+
+The Congress page shows whether each chamber is meeting, from [clerk.house.gov](https://clerk.house.gov/) and the [Senate floor schedule](https://www.senate.gov/legislative/schedule/floor_schedule.htm), and what the House may vote on this week, from [docs.house.gov](https://docs.house.gov/floor/). The hourly `congress` run fetches them; status older than 6 hours is hidden. Each state page counts bills with official action in the week before its last good scrape (new, passed a vote, became law, vetoed) and gives the last vote date. LegiScan-only states have no counts.
 
 ## New laws starting soon
 
